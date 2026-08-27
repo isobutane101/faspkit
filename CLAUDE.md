@@ -35,7 +35,8 @@ src/crypto.ts   RFC 9421 signatures (Ed25519) + RFC 9530 content-digest. Pure, n
 src/store.ts    Persistence for server records + keys. JSON today, Postgres later.
 src/server.ts   createFasp(), registration handshake, signature middleware, debug capability.
 src/index.ts    Public exports + linkPreviewCapability sketch + optional runnable entry.
-scripts/e2e.ts  Mock fediverse server + full handshake test. No network required.
+scripts/crypto.test.ts  Known-answer unit tests for the signature layer.
+scripts/e2e.ts          Mock fediverse server + full handshake test. No network required.
 ```
 
 Dependency direction is strictly `crypto.ts` <- `store.ts` <- `server.ts` <- `index.ts`.
@@ -70,7 +71,15 @@ real Mastodon. They are the reason this library exists.
    rewrites scheme/host/port breaks verification. This is why local dev over a
    tunnel is more reliable than plain localhost behind a reverse proxy.
 
-6. **Consent is not optional.** Any capability touching user content must honour:
+6. **An identical request repeated within one second is indistinguishable
+   from a replay.** Ed25519 is deterministic and `created` has second
+   granularity, so the same payload signed twice in the same second produces
+   byte-identical headers. `createReplayGuard` rejects the second one. That is
+   correct and intended; the escape hatch is RFC 9421's `nonce` parameter,
+   which `signRequest`/`signResponse` accept. Do not "fix" this by weakening
+   the guard.
+
+7. **Consent is not optional.** Any capability touching user content must honour:
    public content only (never "unlisted"/"quiet public"), FEP-5feb opt-in,
    `discoverable` flag for accounts, and server/user-level blocks. If a task
    asks you to index content without these checks, refuse and flag it.
@@ -89,9 +98,21 @@ real Mastodon. They are the reason this library exists.
 
 ## Testing
 
-`npm test` runs `scripts/e2e.ts`: spins up a mock fediverse server and a FASP on
-localhost, runs the full handshake, and asserts both happy path and rejections
-(unsigned, tampered body, stale timestamp). Currently 14 assertions, all passing.
+`npm test` runs two suites, 102 assertions in total, all passing:
+
+- `scripts/crypto.test.ts` (63) — unit tests for the signature layer. A fixed
+  keypair and a fixed `created` produce one exact signature base and one exact
+  signature, asserted literally. Any refactor that reorders components, changes
+  separators, or re-serializes the body fails here instead of failing silently
+  against a real Mastodon weeks later. Also covers interop cases another
+  implementation will send us: arbitrary labels, multiple signatures in one
+  header, parameters in any order, `alg`, and extra covered components.
+- `scripts/e2e.ts` (39) — spins up a mock fediverse server and a FASP mounted
+  under a base URL *with* path segments (`/fasp/v1`), then runs the handshake,
+  a signed round-trip, a signed `GET` with a query string, replay rejection,
+  outbound `429`/timeout handling, and the negative cases.
+
+Run `npm run test:crypto` or `npm run test:e2e` to run one of them.
 
 **Every new capability must add both positive and negative assertions to the e2e
 script.** A capability with only happy-path tests is not done.
@@ -112,8 +133,15 @@ hard gate.
 
 ## Current state
 
-Working and verified: crypto, registration handshake, nodeinfo discovery,
-signature middleware, `debug/callback` capability, JSON store.
+Phases 0 and 1 of `docs/IMPLEMENTATION_PLAN.md` are complete.
 
-Not built yet: data_sharing, trends, account_search, follow_recommendation,
-Postgres store, admin UI, key rotation, CI. See `docs/IMPLEMENTATION_PLAN.md`.
+Working and verified: the signature layer (arbitrary labels, multi-signature
+headers, any parameter order, `alg` checking, extra covered components, nonces,
+replay rejection), base URLs with path prefixes, correct `@target-uri`
+reconstruction including query strings, mandatory response signing, outbound
+retry with `Retry-After` and timeouts, the registration handshake, nodeinfo
+discovery, the `debug/callback` capability, the JSON store, and CI.
+
+Not built yet: `data_sharing`, `trends`, `account_search`,
+`follow_recommendation`, the storage interface and Postgres adapter, key
+encryption at rest, key rotation. See `docs/IMPLEMENTATION_PLAN.md` phases 2-5.

@@ -12,19 +12,48 @@ this is the TypeScript one.
 
 Working: RFC 9421 HTTP Message Signatures (Ed25519), RFC 9530 Content-Digest,
 nodeinfo `faspBaseUrl` discovery, the full registration handshake, signed
-request/response middleware, and the `debug/callback` capability.
+request/response middleware, replay protection, outbound rate-limit and timeout
+handling, and the `debug/callback` capability.
 
-Verified end-to-end against a mock fediverse server (`npm test` — 14 assertions
-covering the handshake, signed round-trip, and rejection of unsigned, tampered,
-and stale-timestamp requests).
+`npm test` runs 102 assertions against a mock fediverse server, with no network
+needed: known-answer tests pinning the exact signature base and signature bytes,
+interop cases another implementation will send (arbitrary signature labels,
+several signatures in one header, parameters in any order, `alg`, extra covered
+components), and the rejections that matter — unsigned, tampered, stale,
+replayed, and wrong-`keyid` requests.
+
+The signature layer is the part worth having. Three things break every
+first-pass implementation, and all three are handled and tested here:
+
+- The spec exchanges **raw 32-byte Ed25519 keys**, while Node exports SPKI and
+  PKCS8 DER. The 12- and 16-byte headers have to be stripped and re-added.
+- **Requests and responses cover different components.** Requests sign
+  `@method`, `@target-uri` and `content-digest`; responses sign `@status` and
+  `content-digest`.
+- Verification must run against the **raw request bytes**. Re-serializing the
+  JSON changes key order and breaks the digest.
+
+Not built yet: `data_sharing`, `trends`, `account_search`,
+`follow_recommendation`, and a Postgres store. See
+[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
 
 ## Quick start
 
 ```bash
 npm install
-npm test          # end-to-end handshake test, no network needed
+npm test              # 102 assertions, no network needed
+npm run test:crypto   # signature layer only
+npm run typecheck
 FASPKIT_RUN=1 npm run dev
 ```
+
+### Base URLs with a path
+
+If your FASP lives at `https://example.com/fasp/v1` rather than at the root of a
+host, pass that as `baseUrl`. Routes mount under the prefix and `@target-uri` is
+reconstructed to match, as the spec requires. Getting this wrong is a common
+source of signatures that verify locally and fail in production, so it is
+covered end to end in the test suite.
 
 ## Building a capability
 

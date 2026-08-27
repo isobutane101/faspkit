@@ -4,12 +4,22 @@
   "description": "TypeScript toolkit for building Fediverse Auxiliary Service Providers (FASP)",
   "main": "dist/index.js",
   "scripts": {
-    "test": "tsx scripts/e2e.ts",
+    "test": "tsx scripts/crypto.test.ts && tsx scripts/e2e.ts",
+    "test:crypto": "tsx scripts/crypto.test.ts",
+    "test:e2e": "tsx scripts/e2e.ts",
+    "typecheck": "tsc --noEmit",
     "build": "tsc",
     "dev": "tsx watch src/index.ts"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "fasp",
+    "fediverse",
+    "mastodon",
+    "activitypub",
+    "rfc9421",
+    "http-message-signatures"
+  ],
+  "author": "isobutane101",
   "license": "AGPL-3.0",
   "dependencies": {
     "express": "^4.22.2"

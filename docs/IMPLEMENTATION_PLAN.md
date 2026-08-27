@@ -16,19 +16,19 @@ in this file when complete.
 
 ## Phase 0 — Repo hygiene (do first, ~30 min)
 
-- [ ] **0.1 Verify baseline.** Run `npm install`, `npx tsc --noEmit`, `npm test`.
+- [x] **0.1 Verify baseline.** Run `npm install`, `npx tsc --noEmit`, `npm test`.
       Confirm 14/14 assertions pass before changing anything. If they don't,
       stop and report — do not "fix" by weakening assertions.
 
-- [ ] **0.2 Add CI.** Create `.github/workflows/ci.yml`: on push and PR, Node 20
+- [x] **0.2 Add CI.** Create `.github/workflows/ci.yml`: on push and PR, Node 20
       and 22 matrix, run `npm ci`, `npx tsc --noEmit`, `npm test`.
       *Accept:* workflow is valid YAML and green on first push.
 
-- [ ] **0.3 Add `.env.example`** documenting `PORT`, `FASP_BASE_URL`, `FASP_NAME`,
+- [x] **0.3 Add `.env.example`** documenting `PORT`, `FASP_BASE_URL`, `FASP_NAME`,
       `FASPKIT_DATA`, `FASPKIT_RUN`. Confirm `.env` and `data/` are gitignored.
       *Accept:* `git status` shows no key material or env files staged.
 
-- [ ] **0.4 Split crypto tests out.** Move signature/digest unit tests into
+- [x] **0.4 Split crypto tests out.** Move signature/digest unit tests into
       `scripts/crypto.test.ts` (keep `e2e.ts` for the integration path). Add
       known-answer tests: fixed keypair + fixed `created` => stable signature base.
       *Accept:* signature base string is asserted literally, so a refactor that
@@ -40,38 +40,52 @@ in this file when complete.
 
 This is what makes the library worth using. Prioritize it over new capabilities.
 
-- [ ] **1.1 Signature edge cases.** Currently `verifyRequest` assumes label `sig1`
+- [x] **1.1 Signature edge cases.** Currently `verifyRequest` assumes label `sig1`
       and a single signature. Handle: arbitrary labels, multiple signatures in one
       header (pick the one whose covered components satisfy us), and `Signature-Input`
       params in any order. Reject unknown `alg` if present.
       *Accept:* tests for label `mysig`, two-signature header, and reordered params.
 
-- [ ] **1.2 Base URL path prefixes.** Spec: if a base URL contains path segments,
+- [x] **1.2 Base URL path prefixes.** Spec: if a base URL contains path segments,
       all API paths MUST be prefixed. `createFasp` currently mounts at root.
       Add a `basePath` option; ensure `@target-uri` reconstruction in
       `requireSignature` uses the full external URL including prefix.
       *Accept:* e2e test with FASP mounted at `https://host/fasp/v1` passes.
 
-- [ ] **1.3 Fix `@target-uri` reconstruction.** It currently concatenates
+- [x] **1.3 Fix `@target-uri` reconstruction.** It currently concatenates
       `opts.baseUrl + req.originalUrl`, which double-counts if `baseUrl` has a
       path, and ignores query strings on GET capabilities (needed for
       `account_search`). Derive the target URI correctly and test with a query string.
       *Accept:* signed `GET /account_search/v0/search?term=x&limit=5` verifies.
 
-- [ ] **1.4 Response signing correctness.** `sendSigned` silently skips signing
+- [x] **1.4 Response signing correctness.** `sendSigned` silently skips signing
       when `req.faspServer` is absent. Make that an explicit error rather than a
       silent unsigned response.
       *Accept:* unit test asserts unsigned responses are impossible on guarded routes.
 
-- [ ] **1.5 Replay protection.** Timestamp skew alone doesn't prevent replay within
+- [x] **1.5 Replay protection.** Timestamp skew alone doesn't prevent replay within
       the window. Add an in-memory LRU of seen (keyid, signature) pairs with TTL
       equal to the skew window; reject duplicates with `401`.
       *Accept:* replaying a valid signed request twice yields `201` then `401`.
 
-- [ ] **1.6 Outbound retry + rate-limit handling.** `callServer` must honour `429`
+- [x] **1.6 Outbound retry + rate-limit handling.** `callServer` must honour `429`
       + `Retry-After` with bounded exponential backoff, and time out. Servers may
       be slow or down; a FASP must not hang.
       *Accept:* mock server returning `429` then `201` succeeds; permanent `429` gives up.
+
+---
+
+**Phases 0 and 1 are complete.** `npm test` runs 102 assertions across
+`scripts/crypto.test.ts` (63) and `scripts/e2e.ts` (39); `npx tsc --noEmit` is
+clean. Two notes for whoever picks up Phase 2:
+
+- Repeating a byte-identical request within one second is now rejected as a
+  replay, because deterministic Ed25519 plus second-granularity `created` makes
+  it indistinguishable from one. `signRequest`/`signResponse` accept an RFC 9421
+  `nonce` for callers that legitimately need to repeat a request.
+- The replay guard is per-process and in-memory. A FASP running more than one
+  instance behind a load balancer will not catch a replay that lands on a
+  different instance; that wants a shared store, which is Phase 2 work.
 
 ---
 

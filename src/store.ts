@@ -17,20 +17,27 @@ export interface ServerRecord {
   status: "pending" | "active";
 }
 
-const DATA_DIR = process.env.FASPKIT_DATA ?? path.join(process.cwd(), "data");
-const DB_PATH = path.join(DATA_DIR, "servers.json");
+// Resolved per call, not at import time, so tests and embedders can point
+// FASPKIT_DATA somewhere else after this module has been loaded.
+function dataDir(): string {
+  return process.env.FASPKIT_DATA ?? path.join(process.cwd(), "data");
+}
+
+function dbPath(): string {
+  return path.join(dataDir(), "servers.json");
+}
 
 function load(): Record<string, ServerRecord> {
   try {
-    return JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
+    return JSON.parse(fs.readFileSync(dbPath(), "utf8"));
   } catch {
     return {};
   }
 }
 
 function save(db: Record<string, ServerRecord>) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+  fs.mkdirSync(dataDir(), { recursive: true });
+  fs.writeFileSync(dbPath(), JSON.stringify(db, null, 2));
 }
 
 export function newId(): string {
