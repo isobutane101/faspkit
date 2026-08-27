@@ -305,6 +305,36 @@ export function sendSigned(
   res.status(status).type("application/json").send(payload);
 }
 
+const GUARDED_METHODS = ["get", "post", "put", "patch", "delete", "all"] as const;
+
+/**
+ * A Router that attaches the signature guard to each route registered on it,
+ * rather than to the router as a whole.
+ *
+ * `router.use(guard)` would look equivalent and is subtly wrong: router-level
+ * middleware runs for every request that reaches the router, including ones
+ * that match none of its routes. Because this router is mounted at the FASP
+ * root, that made `/health` require a signature and caused any route added
+ * after `createFasp` returned — an ActivityPub actor, say — to be answered with
+ * 401 before it could ever be matched.
+ *
+ * Capabilities register routes with the usual verb methods, so guarding those
+ * is enough. A capability that calls `.use()` directly is not guarded, which is
+ * why capabilities should register concrete routes.
+ */
+function createGuardedRouter(guard: express.RequestHandler): express.Router {
+  const router = express.Router();
+  return new Proxy(router, {
+    get(target, prop, receiver) {
+      if (typeof prop === "string" && (GUARDED_METHODS as readonly string[]).includes(prop)) {
+        return (path: string, ...handlers: express.RequestHandler[]) =>
+          (target as unknown as Record<string, (...a: unknown[]) => unknown>)[prop](path, guard, ...handlers);
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+}
+
 export function createFasp(opts: FaspOptions) {
   const { basePath } = splitBaseUrl(opts.baseUrl);
   const app = express();
@@ -348,8 +378,7 @@ export function createFasp(opts: FaspOptions) {
     }
   });
 
-  const guarded = express.Router();
-  guarded.use(requireSignature(opts));
+  const guarded = createGuardedRouter(requireSignature(opts));
   for (const cap of opts.capabilities) cap.register?.(guarded);
   routes.use(guarded);
 

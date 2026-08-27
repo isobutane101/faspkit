@@ -121,26 +121,50 @@ This is the gateway to trends / account_search / follow_recommendation. See
 `docs/SPEC_NOTES.md` for exact shapes. **Consent enforcement is the hard part and
 the whole point — do not defer it.**
 
-- [ ] **3.1 Announcement receiver.** Implement `POST /data_sharing/v0/announcements`
+- [x] **3.1 Announcement receiver.** Implement `POST /data_sharing/v0/announcements`
       as a guarded route. Parse `source` (subscription vs backfillRequest),
       `category`, `eventType`, `objectUris`. Dispatch to a user-supplied handler.
       *Accept:* e2e test posts both an event announcement and a backfill fulfilment.
 
-- [ ] **3.2 Subscription + backfill client.** Helpers to `POST`/`DELETE`
+- [x] **3.2 Subscription + backfill client.** Helpers to `POST`/`DELETE`
       `/data_sharing/v0/event_subscriptions` and `POST` `/data_sharing/v0/backfill_requests`,
       plus `.../{id}/continuation`. Handle `422`, `201`, `204`, `404` per spec.
       *Accept:* mock server exercises every documented status code.
 
-- [ ] **3.3 Object fetcher with consent gate.** Announcements carry URIs only. Build
+- [x] **3.3 Object fetcher with consent gate.** Announcements carry URIs only. Build
       a fetcher that retrieves each object and **rejects** it unless:
       `to:` indicates genuine public scope; FEP-5feb opt-in is present; for accounts,
       `discoverable === true`. Log rejections with a reason.
       *Accept:* fixtures for public, unlisted, and non-opted-in objects — only the
       first is accepted. **This test is mandatory.**
 
-- [ ] **3.4 Deduplication.** The same object arrives from many servers. Dedupe by
+- [x] **3.4 Deduplication.** The same object arrives from many servers. Dedupe by
       URI with a persistent seen-set.
       *Accept:* the same URI announced by two mock servers is fetched once.
+
+---
+
+**Phase 3 is complete**, and reading the full spec rather than the condensed
+notes turned up more than the task list implied. Three things were built that
+the plan did not name, because the spec requires them before a single object can
+be fetched: an ActivityPub server actor at `/actor` with its own RSA keypair,
+WebFinger, and double-knocking between RFC 9421 and draft-cavage signatures.
+`docs/SPEC_NOTES.md` has been corrected accordingly — the announcement endpoint
+answers `204` not `201`, `eventType` includes `trending`, and backfill responses
+carry `moreObjectsAvailable`.
+
+**Still outstanding from this phase:** the spec requires re-checking indexed
+content and accounts at least weekly to confirm they are still public and still
+opted in, and that loop is not built. It needs a persistent record of what was
+indexed and when, which is really Phase 2 storage work — so it is listed here
+rather than silently dropped:
+
+- [ ] **3.5 Weekly revalidation.** Re-fetch indexed objects and accounts at
+      least once a week, re-run the consent gate, apply updates, and remove
+      anything that is no longer public or no longer opted in. Objects covered
+      by a live subscription MAY skip the week's check.
+      *Accept:* a fixture whose author flips `indexable` to `false` is dropped
+      on the next pass.
 
 ---
 

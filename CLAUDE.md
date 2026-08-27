@@ -31,15 +31,22 @@ rather than inventing endpoint shapes.
 ## Architecture
 
 ```
-src/crypto.ts   RFC 9421 signatures (Ed25519) + RFC 9530 content-digest. Pure, no I/O.
-src/store.ts    Persistence for server records + keys. JSON today, Postgres later.
-src/server.ts   createFasp(), registration handshake, signature middleware, debug capability.
-src/index.ts    Public exports + linkPreviewCapability sketch + optional runnable entry.
-scripts/crypto.test.ts  Known-answer unit tests for the signature layer.
-scripts/e2e.ts          Mock fediverse server + full handshake test. No network required.
+src/crypto.ts       RFC 9421 signatures (Ed25519) + RFC 9530 content-digest. Pure, no I/O.
+src/consent.ts      FEP-5feb / public-scope consent rules. Pure, no I/O.
+src/store.ts        Server records, keys, and the dedup seen-set. JSON today.
+src/activitypub.ts  Server actor, WebFinger, signed object fetching, double-knocking.
+src/server.ts       createFasp(), registration handshake, signature middleware, debug capability.
+src/datasharing.ts  data_sharing capability: announcements, subscriptions, backfill.
+src/index.ts        Public exports + linkPreviewCapability sketch + optional runnable entry.
+
+scripts/crypto.test.ts       Known-answer unit tests for the signature layer.
+scripts/consent.test.ts      Consent fixtures: public vs unlisted vs opted-out.
+scripts/e2e.ts               Mock fediverse server + full handshake test.
+scripts/datasharing.test.ts  Announcements, consent gate, dedup, double-knocking.
 ```
 
-Dependency direction is strictly `crypto.ts` <- `store.ts` <- `server.ts` <- `index.ts`.
+Dependency direction is strictly `crypto.ts`/`consent.ts` <- `store.ts` <-
+`activitypub.ts` <- `server.ts` <- `datasharing.ts` <- `index.ts`.
 Keep `crypto.ts` free of Express and filesystem imports — it must stay unit-testable
 and reusable by people who don't want the rest of the toolkit.
 
@@ -98,7 +105,7 @@ real Mastodon. They are the reason this library exists.
 
 ## Testing
 
-`npm test` runs two suites, 102 assertions in total, all passing:
+`npm test` runs four suites, 206 assertions in total, all passing:
 
 - `scripts/crypto.test.ts` (63) — unit tests for the signature layer. A fixed
   keypair and a fixed `created` produce one exact signature base and one exact
@@ -107,12 +114,21 @@ real Mastodon. They are the reason this library exists.
   against a real Mastodon weeks later. Also covers interop cases another
   implementation will send us: arbitrary labels, multiple signatures in one
   header, parameters in any order, `alg`, and extra covered components.
+- `scripts/consent.test.ts` (50) — the consent gate, against fixtures for
+  public, unlisted, followers-only, opted-out, and mismatched-author documents.
+  These are the assertions with real consequences for real people; every
+  plausible way a document could sneak past is asserted to fail closed.
 - `scripts/e2e.ts` (39) — spins up a mock fediverse server and a FASP mounted
   under a base URL *with* path segments (`/fasp/v1`), then runs the handshake,
   a signed round-trip, a signed `GET` with a query string, replay rejection,
   outbound `429`/timeout handling, and the negative cases.
+- `scripts/datasharing.test.ts` (54) — four servers: the registered instance, a
+  modern origin, a legacy cavage-only origin, and the FASP. Covers the
+  announcement endpoint, the consent gate end to end, deduplication,
+  double-knocking, deletes, and backfill continuation.
 
-Run `npm run test:crypto` or `npm run test:e2e` to run one of them.
+Run `npm run test:crypto`, `test:consent`, `test:e2e` or `test:datasharing` to
+run one of them.
 
 **Every new capability must add both positive and negative assertions to the e2e
 script.** A capability with only happy-path tests is not done.
@@ -133,15 +149,24 @@ hard gate.
 
 ## Current state
 
-Phases 0 and 1 of `docs/IMPLEMENTATION_PLAN.md` are complete.
+Phases 0, 1 and 3 of `docs/IMPLEMENTATION_PLAN.md` are complete.
 
 Working and verified: the signature layer (arbitrary labels, multi-signature
 headers, any parameter order, `alg` checking, extra covered components, nonces,
 replay rejection), base URLs with path prefixes, correct `@target-uri`
 reconstruction including query strings, mandatory response signing, outbound
 retry with `Retry-After` and timeouts, the registration handshake, nodeinfo
-discovery, the `debug/callback` capability, the JSON store, and CI.
+discovery, the `debug/callback` capability, the JSON store, CI, and the full
+`data_sharing` capability — announcements, subscription and backfill clients,
+the consent gate, deduplication, and signed object retrieval with
+double-knocking behind an ActivityPub server actor.
 
-Not built yet: `data_sharing`, `trends`, `account_search`,
+**Known gap:** the spec requires re-checking indexed content and accounts at
+least weekly, to confirm they are still public and still opted in. That
+revalidation loop is not implemented. Anything built on top of `data_sharing`
+needs it before it indexes real data.
+
+Not built yet: the weekly revalidation loop, `trends`, `account_search`,
 `follow_recommendation`, the storage interface and Postgres adapter, key
-encryption at rest, key rotation. See `docs/IMPLEMENTATION_PLAN.md` phases 2-5.
+encryption at rest, key rotation. See `docs/IMPLEMENTATION_PLAN.md` phases 2, 4
+and 5.

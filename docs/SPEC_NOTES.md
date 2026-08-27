@@ -111,6 +111,18 @@ Implemented in `debugCapability()`.
 The prerequisite for trends / account_search / follow_recommendation.
 
 ### Consent rules (MUST — enforce these in code)
+
+FEP-5feb, read in full, is more specific than "check opt-in":
+- `indexable` is an **actor-level** attribute (`http://joinmastodon.org/ns#indexable`,
+  usually compacted to `toot:indexable`). It is not on the object.
+- **A missing `indexable` attribute must be treated as `false`.** Consent is
+  deny-by-default.
+- An object qualifies when its author is `indexable: true` *and* it is addressed
+  `to` the public collection. Public in `cc` only is Mastodon's unlisted / quiet
+  public, which MUST NOT be indexed — so checking `to` and `cc` together, or
+  merely checking that a URL is fetchable, silently indexes forbidden content.
+- Account data additionally requires `discoverable: true`.
+
 - Servers share **local and remote** content (so a FASP sees beyond one instance).
 - FASPs **MUST deduplicate** — the same object arrives from many servers.
 - Only **URIs** are exchanged. The FASP fetches the actual content itself.

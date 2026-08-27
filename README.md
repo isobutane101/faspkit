@@ -15,7 +15,7 @@ nodeinfo `faspBaseUrl` discovery, the full registration handshake, signed
 request/response middleware, replay protection, outbound rate-limit and timeout
 handling, and the `debug/callback` capability.
 
-`npm test` runs 102 assertions against a mock fediverse server, with no network
+`npm test` runs 206 assertions against mock fediverse servers, with no network
 needed: known-answer tests pinning the exact signature base and signature bytes,
 interop cases another implementation will send (arbitrary signature labels,
 several signatures in one header, parameters in any order, `alg`, extra covered
@@ -33,16 +33,33 @@ first-pass implementation, and all three are handled and tested here:
 - Verification must run against the **raw request bytes**. Re-serializing the
   JSON changes key order and breaks the digest.
 
-Not built yet: `data_sharing`, `trends`, `account_search`,
-`follow_recommendation`, and a Postgres store. See
+The `data_sharing` capability is implemented, including the parts that are easy
+to skip: fediverse servers announce object *URIs* only, so faspkit fetches each
+one itself over a signed request — double-knocking between RFC 9421 and the
+older draft-cavage signatures that most deployed software still verifies, behind
+an ActivityPub server actor with WebFinger — deduplicates it, and refuses to
+index anything that does not pass the consent gate.
+
+**Consent is deny-by-default and enforced independently of the announcing
+server.** A server telling faspkit about a URI is not permission to index it.
+Content is accepted only when it is addressed `to` the public collection *and*
+its author has opted in via [FEP-5feb](https://codeberg.org/fediverse/fep/src/branch/main/fep/5feb/fep-5feb.md);
+accounts additionally need `discoverable: true`. Mastodon's "unlisted" / "quiet
+public" posts are publicly fetchable and are rejected, which is the case a
+naive implementation gets wrong. A missing opt-in attribute counts as a refusal,
+never a pass.
+
+Not built yet: the spec's weekly revalidation of indexed content, `trends`,
+`account_search`, `follow_recommendation`, and a Postgres store. See
 [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
 
 ## Quick start
 
 ```bash
 npm install
-npm test              # 102 assertions, no network needed
+npm test              # 206 assertions, no network needed
 npm run test:crypto   # signature layer only
+npm run test:consent  # consent gate fixtures
 npm run typecheck
 FASPKIT_RUN=1 npm run dev
 ```

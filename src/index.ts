@@ -3,6 +3,9 @@ import { createFasp, debugCapability, sendSigned, Capability } from "./server.js
 export * from "./crypto.js";
 export * from "./server.js";
 export * from "./store.js";
+export * from "./consent.js";
+export * from "./activitypub.js";
+export * from "./datasharing.js";
 
 /**
  * Sketch of a `link_preview` capability — one of the examples Mastodon names
