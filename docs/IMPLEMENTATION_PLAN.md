@@ -96,7 +96,11 @@ clean. Two notes for whoever picks up Phase 2:
       Make the JSON implementation one adapter behind it; inject into `createFasp`.
       *Accept:* `server.ts` imports the interface, not the JSON module.
 
-- [ ] **2.2 Postgres adapter.** *(not started — needs the `pg` decision below)* Implement `PostgresStore` against the same
+- [x] ~~**2.2 Postgres adapter.**~~ **Dropped by decision: faspkit stays
+      dependency-free.** The JSON adapter now caches in memory and writes
+      through atomically, which is enough for a single-process FASP. Anyone
+      needing multi-instance deployment implements the async `FaspStore`
+      interface against their own database — that is why it is async. Implement `PostgresStore` against the same
       interface using `pg`. Schema: `servers` table with the `ServerRecord` fields,
       unique index on `server_id` and `fasp_id`.
       *Ask before adding `pg` as a dependency.*
@@ -120,9 +124,9 @@ Postgres adapter can drop in without touching a call site — which required
 resolving signature keys before verification rather than from inside it, hence
 `signatureKeyids()` in `crypto.ts` and `lookupKey` now accepting several keys.
 
-**2.2 still needs your call**, because `pg` would be the first runtime
-dependency beyond Express and changes what faspkit is positioned as. Everything
-else in this phase is dependency-free.
+**2.2 was dropped:** no Postgres, no runtime dependency beyond Express. The
+tradeoff is stated plainly in the store — a single process must own the data
+directory, because each process caches records in memory.
 
 One honest caveat on 2.4: the FASP spec defines no key-rotation handshake, so
 `rotateTheirKey` (accept a new key from an instance, keeping the old one for an
@@ -225,13 +229,35 @@ The strategic payoff. Cheap relative to its value.
 
 ---
 
+## Phase 6 — the discovery capabilities (done)
+
+Added after the goal was restated as *build the FASP layer*. All three remaining
+v0.1 capabilities are implemented, so faspkit now covers the entire spec.
+
+- [x] **6.1 `account_search`.** GET with `term` (required, else 422) and
+      `limit` (default 20). Answers a bare JSON array of actor URIs sorted by
+      relevance — not an object; wrapping it would break conforming clients.
+      RFC 5988 `Link: rel="next"` pagination.
+- [x] **6.2 `trends`.** GET `/trends/v0/{content,hashtags,links}` with
+      `withinLastHours` (default 24, at least 168 supported), `maxCount`
+      (default 20) and `language` (RFC 4647 basic filtering). Ranks are clamped
+      to 1..100 and re-sorted descending, because a server merging results from
+      several FASPs depends on both.
+- [x] **6.3 `follow_recommendation`.** GET with `accountUri` (required, else
+      422) and optional `language`. Filtering out already-followed, blocked and
+      domain-blocked accounts is explicitly the fediverse server's job.
+- [x] **6.4 Reference index.** `createReferenceIndex()` ingests consent-gated
+      objects and answers all three, so the layer runs and is testable end to
+      end rather than being a set of interfaces.
+
 ## Explicitly out of scope
 
 Do not build these without an explicit new instruction:
 
-- A Fediscovery competitor (search/discovery FASP). Mastodon gGmbH runs that,
-  grant-funded. We build the toolkit and the capabilities they've asked third
-  parties to provide.
 - Admin web UI, dashboards, billing, or user accounts.
-- Any ORM, bundler, or framework beyond `tsc`/`tsx`.
-- ActivityPub server functionality. faspkit is a FASP, not a fediverse server.
+- Any ORM, bundler, database driver, or framework beyond `tsc`/`tsx`.
+- ActivityPub server functionality beyond the server actor the spec requires.
+  faspkit is a FASP, not a fediverse server.
+- A sophisticated ranking model in `refindex.ts`. It is a documented baseline;
+  competing on the algorithm belongs in a provider, which is what the seam is
+  for.

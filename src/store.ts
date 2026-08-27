@@ -96,6 +96,17 @@ export function newId(): string {
 
 // ---------------------------------------------------------------------------
 // JSON file adapter
+//
+// Records are held in memory and written through to disk on change, with an
+// atomic rename so an interrupted write cannot corrupt the file. That keeps the
+// hot paths — a key lookup on every signature check, a dedup check on every
+// announced URI — off the filesystem entirely.
+//
+// The tradeoff is deliberate and worth stating: this assumes a single process
+// owns the directory. Two processes sharing one data directory will lose
+// writes, because each holds its own copy in memory. A FASP that needs to run
+// more than one instance wants a shared database behind the same `FaspStore`
+// interface, which is exactly why that interface is async.
 // ---------------------------------------------------------------------------
 
 const PRIVATE_FIELDS = ["ourPrivateKey", "previousOurPrivateKey"] as const;
@@ -105,17 +116,40 @@ export interface JsonStoreOptions {
   dataDir?: string;
   /** Defaults to one built from the environment. */
   secretBox?: SecretBox;
+  /**
+   * Cap on the dedup set before the oldest entries are evicted.
+   * Defaults to one million URIs.
+   */
+  maxSeenEntries?: number;
 }
 
 export function createJsonStore(options: JsonStoreOptions = {}): FaspStore {
   // Resolved per call, not captured at construction, so tests and embedders can
   // point FASPKIT_DATA somewhere else after this module has been loaded.
   const dataDir = () => options.dataDir ?? process.env.FASPKIT_DATA ?? path.join(process.cwd(), "data");
-  const serversPath = () => path.join(dataDir(), "servers.json");
-  const seenPath = () => path.join(dataDir(), "seen.json");
+  const maxSeen = options.maxSeenEntries ?? 1_000_000;
 
   let box: SecretBox | undefined = options.secretBox;
   const secretBox = () => (box ??= secretBoxFromEnv());
+
+  // Everything is held in memory and written through on change. Reads happen
+  // on every signature verification and every announcement, so re-parsing the
+  // file each time is the difference between a store that works at scale and
+  // one that falls over. The cache is keyed by directory so that changing
+  // FASPKIT_DATA — which the tests do — invalidates it.
+  let cachedDir: string | undefined;
+  let servers: Record<string, ServerRecord> | undefined;
+  let seen: Record<string, string> | undefined;
+  let indexed: Record<string, IndexedRecord> | undefined;
+
+  function invalidateIfMoved() {
+    const dir = dataDir();
+    if (dir === cachedDir) return;
+    cachedDir = dir;
+    servers = undefined;
+    seen = undefined;
+    indexed = undefined;
+  }
 
   function readJson<T>(file: string, fallback: T): T {
     try {
@@ -125,52 +159,73 @@ export function createJsonStore(options: JsonStoreOptions = {}): FaspStore {
     }
   }
 
-  function writeJson(file: string, value: unknown) {
-    fs.mkdirSync(dataDir(), { recursive: true });
-    // Write via a temp file so a crash mid-write cannot truncate the store.
+  function writeJson(name: string, value: unknown) {
+    const dir = dataDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, name);
+    // Write to a temp file and rename, so a crash mid-write leaves the previous
+    // contents intact rather than a truncated file.
     const tmp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
     fs.renameSync(tmp, file);
   }
 
-  function decrypt(rec: ServerRecord): ServerRecord {
+  function mapPrivateFields(rec: ServerRecord, fn: (v: string) => string): ServerRecord {
     const out = { ...rec };
     for (const field of PRIVATE_FIELDS) {
       const value = out[field];
-      if (typeof value === "string") out[field] = secretBox().open(value);
+      if (typeof value === "string") out[field] = fn(value);
     }
     return out;
   }
 
-  function encrypt(rec: ServerRecord): ServerRecord {
-    const out = { ...rec };
-    for (const field of PRIVATE_FIELDS) {
-      const value = out[field];
-      if (typeof value === "string") out[field] = secretBox().seal(value);
+  function loadServers(): Record<string, ServerRecord> {
+    invalidateIfMoved();
+    if (servers) return servers;
+    const raw = readJson<Record<string, ServerRecord>>(path.join(dataDir(), "servers.json"), {});
+    const out: Record<string, ServerRecord> = {};
+    for (const [id, rec] of Object.entries(raw)) out[id] = mapPrivateFields(rec, (v) => secretBox().open(v));
+    return (servers = out);
+  }
+
+  function saveServers() {
+    const out: Record<string, ServerRecord> = {};
+    for (const [id, rec] of Object.entries(servers ?? {})) {
+      out[id] = mapPrivateFields(rec, (v) => secretBox().seal(v));
     }
-    return out;
+    writeJson("servers.json", out);
   }
 
-  function load(): Record<string, ServerRecord> {
-    const raw = readJson<Record<string, ServerRecord>>(serversPath(), {});
-    const out: Record<string, ServerRecord> = {};
-    for (const [id, rec] of Object.entries(raw)) out[id] = decrypt(rec);
-    return out;
+  function loadSeen(): Record<string, string> {
+    invalidateIfMoved();
+    return (seen ??= readJson<Record<string, string>>(path.join(dataDir(), "seen.json"), {}));
   }
 
-  function save(db: Record<string, ServerRecord>) {
-    const out: Record<string, ServerRecord> = {};
-    for (const [id, rec] of Object.entries(db)) out[id] = encrypt(rec);
-    writeJson(serversPath(), out);
+  function loadIndexed(): Record<string, IndexedRecord> {
+    invalidateIfMoved();
+    return (indexed ??= readJson<Record<string, IndexedRecord>>(path.join(dataDir(), "indexed.json"), {}));
   }
 
-  const loadSeen = () => readJson<Record<string, string>>(seenPath(), {});
-  const indexedPath = () => path.join(dataDir(), "indexed.json");
-  const loadIndexed = () => readJson<Record<string, IndexedRecord>>(indexedPath(), {});
+  /**
+   * The dedup set grows without bound otherwise — a busy FASP is told about
+   * millions of URIs. Evicting the oldest entries is safe: the worst case is
+   * re-fetching an object we had already seen, which the consent gate re-checks
+   * anyway. Anything currently indexed is kept regardless of age, because
+   * forgetting that would let a revoked object silently reappear.
+   */
+  function pruneSeen(current: Record<string, string>) {
+    const uris = Object.keys(current);
+    if (uris.length <= maxSeen) return;
+    const keep = loadIndexed();
+    const evictable = uris
+      .filter((u) => !(u in keep))
+      .sort((a, b) => current[a].localeCompare(current[b]));
+    for (const uri of evictable.slice(0, uris.length - maxSeen)) delete current[uri];
+  }
 
   return {
     async createServer(serverUrl, baseUrl) {
-      const db = load();
+      const db = loadServers();
       const { publicKey, privateKey } = generateKeypair();
       const rec: ServerRecord = {
         serverId: newId(),
@@ -183,40 +238,43 @@ export function createJsonStore(options: JsonStoreOptions = {}): FaspStore {
         status: "pending",
       };
       db[rec.serverId] = rec;
-      save(db);
+      saveServers();
       return rec;
     },
 
     async getServer(serverId) {
-      return load()[serverId];
+      return loadServers()[serverId];
     },
 
     async updateServer(serverId, patch) {
-      const db = load();
+      const db = loadServers();
       if (!db[serverId]) throw new Error(`unknown server ${serverId}`);
       db[serverId] = { ...db[serverId], ...patch };
-      save(db);
+      saveServers();
       return db[serverId];
     },
 
     async allServers() {
-      return Object.values(load());
+      return Object.values(loadServers());
     },
 
     async serverByFaspId(faspId) {
-      return Object.values(load()).find((s) => s.faspId === faspId);
+      return Object.values(loadServers()).find((s) => s.faspId === faspId);
     },
 
     async markSeen(uris) {
-      const seen = loadSeen();
+      const current = loadSeen();
       const at = new Date().toISOString();
       const fresh: string[] = [];
       for (const uri of uris) {
-        if (uri in seen) continue;
-        seen[uri] = at;
+        if (uri in current) continue;
+        current[uri] = at;
         fresh.push(uri);
       }
-      if (fresh.length) writeJson(seenPath(), seen);
+      if (fresh.length) {
+        pruneSeen(current);
+        writeJson("seen.json", current);
+      }
       return fresh;
     },
 
@@ -225,10 +283,10 @@ export function createJsonStore(options: JsonStoreOptions = {}): FaspStore {
     },
 
     async forgetSeen(uri) {
-      const seen = loadSeen();
-      if (!(uri in seen)) return;
-      delete seen[uri];
-      writeJson(seenPath(), seen);
+      const current = loadSeen();
+      if (!(uri in current)) return;
+      delete current[uri];
+      writeJson("seen.json", current);
     },
 
     async seenCount() {
@@ -236,12 +294,12 @@ export function createJsonStore(options: JsonStoreOptions = {}): FaspStore {
     },
 
     async recordIndexed(uri, category) {
-      const indexed = loadIndexed();
+      const current = loadIndexed();
       const at = new Date().toISOString();
       // Re-indexing an object refreshes its check clock but keeps the original
       // indexedAt, so the record still says how long we have held it.
-      indexed[uri] = { uri, category, indexedAt: indexed[uri]?.indexedAt ?? at, lastCheckedAt: at };
-      writeJson(indexedPath(), indexed);
+      current[uri] = { uri, category, indexedAt: current[uri]?.indexedAt ?? at, lastCheckedAt: at };
+      writeJson("indexed.json", current);
     },
 
     async listIndexed(opts = {}) {
@@ -251,22 +309,22 @@ export function createJsonStore(options: JsonStoreOptions = {}): FaspStore {
         records = records.filter((r) => new Date(r.lastCheckedAt).getTime() < cutoff);
       }
       // Oldest check first, so a limited pass always drains the most overdue.
-      records.sort((a, b) => a.lastCheckedAt.localeCompare(b.lastCheckedAt));
+      records = [...records].sort((a, b) => a.lastCheckedAt.localeCompare(b.lastCheckedAt));
       return opts.limit === undefined ? records : records.slice(0, opts.limit);
     },
 
     async markRevalidated(uri, at = new Date()) {
-      const indexed = loadIndexed();
-      if (!indexed[uri]) return;
-      indexed[uri] = { ...indexed[uri], lastCheckedAt: at.toISOString() };
-      writeJson(indexedPath(), indexed);
+      const current = loadIndexed();
+      if (!current[uri]) return;
+      current[uri] = { ...current[uri], lastCheckedAt: at.toISOString() };
+      writeJson("indexed.json", current);
     },
 
     async removeIndexed(uri) {
-      const indexed = loadIndexed();
-      if (!(uri in indexed)) return;
-      delete indexed[uri];
-      writeJson(indexedPath(), indexed);
+      const current = loadIndexed();
+      if (!(uri in current)) return;
+      delete current[uri];
+      writeJson("indexed.json", current);
     },
 
     async indexedCount() {

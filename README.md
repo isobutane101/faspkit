@@ -8,14 +8,29 @@ Implements the [FASP general specification v0.1](https://github.com/mastodon/fed
 from Mastodon. The only official SDK today is Ruby (`mastodon/fasp_ruby`);
 this is the TypeScript one.
 
+**Every capability in the v0.1 spec is implemented.** `FASPKIT_RUN=1` starts a
+FASP that registers with an instance, ingests consented content from across the
+fediverse, and answers search, trends and follow-recommendation queries.
+
 ## Status
+
+| Capability | Status |
+| --- | --- |
+| `general` (registration, signatures, `provider_info`) | done |
+| `debug` (`callback`) | done |
+| `data_sharing` (announcements, subscriptions, backfill, consent) | done |
+| `account_search` | done |
+| `trends` (content, hashtags, links) | done |
+| `follow_recommendation` | done |
+| `link_preview` | no spec exists yet — see the plan |
 
 Working: RFC 9421 HTTP Message Signatures (Ed25519), RFC 9530 Content-Digest,
 nodeinfo `faspBaseUrl` discovery, the full registration handshake, signed
 request/response middleware, replay protection, outbound rate-limit and timeout
-handling, and the `debug/callback` capability.
+handling, private keys encrypted at rest, and key rotation with an overlap
+window.
 
-`npm test` runs 293 assertions against mock fediverse servers, with no network
+`npm test` runs 366 assertions against mock fediverse servers, with no network
 needed: known-answer tests pinning the exact signature base and signature bytes,
 interop cases another implementation will send (arbitrary signature labels,
 several signatures in one header, parameters in any order, `alg`, extra covered
@@ -55,15 +70,40 @@ withdraws consent, makes a post followers-only, or deletes it. Private keys are
 encrypted at rest with AES-256-GCM, and an instance's signing key can be rotated
 with an overlap window so requests already in flight are not rejected.
 
-Not built yet: `trends`, `account_search`, `follow_recommendation`, and a
-Postgres store adapter. See
-[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
+### Protocol, not algorithm
+
+The three query capabilities implement the protocol — parameter parsing and
+validation, defaults, RFC 4647 language filtering, rank clamping and ordering,
+`Link: rel="next"` pagination, signed responses — and delegate the actual
+searching and ranking to a provider function you supply:
+
+```ts
+trendsCapability({
+  hashtags: async ({ withinLastHours, maxCount, language }) => [
+    { name: "#fediscovery", rank: 100, examples: ["https://fedi.example/status/23"] },
+  ],
+});
+```
+
+This follows the spec, which declines to define how trends are computed and says
+implementations may compete on it. faspkit ships `createReferenceIndex()` as a
+working baseline so the layer runs out of the box; swap in your own provider to
+build a real FASP.
+
+### Storage
+
+No database required. `FaspStore` is an async interface with a JSON adapter that
+caches in memory and writes through atomically. That assumes one process owns
+the data directory — a multi-instance deployment should implement the same
+interface against a shared database.
+
+See [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) for what's next.
 
 ## Quick start
 
 ```bash
 npm install
-npm test              # 293 assertions, no network needed
+npm test              # 366 assertions, no network needed
 npm run test:crypto   # signature layer only
 npm run test:consent  # consent gate fixtures
 npm run typecheck

@@ -4,7 +4,7 @@
   "description": "TypeScript toolkit for building Fediverse Auxiliary Service Providers (FASP)",
   "main": "dist/index.js",
   "scripts": {
-    "test": "tsx scripts/crypto.test.ts && tsx scripts/consent.test.ts && tsx scripts/store.test.ts && tsx scripts/e2e.ts && tsx scripts/datasharing.test.ts",
+    "test": "tsx scripts/crypto.test.ts && tsx scripts/consent.test.ts && tsx scripts/store.test.ts && tsx scripts/e2e.ts && tsx scripts/datasharing.test.ts && tsx scripts/discovery.test.ts",
     "test:crypto": "tsx scripts/crypto.test.ts",
     "test:e2e": "tsx scripts/e2e.ts",
     "typecheck": "tsc --noEmit",
@@ -12,7 +12,8 @@
     "dev": "tsx watch src/index.ts",
     "test:consent": "tsx scripts/consent.test.ts",
     "test:datasharing": "tsx scripts/datasharing.test.ts",
-    "test:store": "tsx scripts/store.test.ts"
+    "test:store": "tsx scripts/store.test.ts",
+    "test:discovery": "tsx scripts/discovery.test.ts"
   },
   "keywords": [
     "fasp",

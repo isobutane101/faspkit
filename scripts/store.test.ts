@@ -192,7 +192,23 @@ async function main() {
     check("revalidating an unknown uri is harmless", (await store.indexedCount()) === 1);
   }
 
-  console.log("\n6. key rotation");
+  console.log("\n6. dedup set stays bounded");
+  {
+    const store = createJsonStore({
+      dataDir: scratch(), secretBox: plaintextSecretBox(), maxSeenEntries: 10,
+    });
+    // Index one URI, then overflow the set well past the cap.
+    await store.markSeen(["keep-me"]);
+    await store.recordIndexed("keep-me", "content");
+    for (let i = 0; i < 50; i++) await store.markSeen([`u${i}`]);
+
+    check("the dedup set is capped", (await store.seenCount()) <= 10, String(await store.seenCount()));
+    check("an indexed URI survives eviction regardless of age", await store.hasSeen("keep-me"));
+    check("the most recent URIs are retained", await store.hasSeen("u49"));
+    check("the oldest evictable URI is gone", !(await store.hasSeen("u0")));
+  }
+
+  console.log("\n7. key rotation");
   {
     const store = createJsonStore({ dataDir: scratch(), secretBox: plaintextSecretBox() });
     const rec = await store.createServer("https://fedi.example", "https://fedi.example/fasp");
