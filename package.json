@@ -1,10 +1,10 @@
 {
   "name": "faspkit",
   "version": "0.1.0",
-  "description": "TypeScript toolkit for building Fediverse Auxiliary Service Providers (FASP)",
+  "description": "Run a Fediverse Auxiliary Service Provider (FASP) \u2014 search, trends and follow recommendations for Mastodon and compatible servers",
   "main": "dist/index.js",
   "scripts": {
-    "test": "tsx scripts/crypto.test.ts && tsx scripts/consent.test.ts && tsx scripts/store.test.ts && tsx scripts/e2e.ts && tsx scripts/datasharing.test.ts && tsx scripts/discovery.test.ts",
+    "test": "tsx scripts/crypto.test.ts && tsx scripts/consent.test.ts && tsx scripts/store.test.ts && tsx scripts/e2e.ts && tsx scripts/datasharing.test.ts && tsx scripts/discovery.test.ts && tsx scripts/app.test.ts",
     "test:crypto": "tsx scripts/crypto.test.ts",
     "test:e2e": "tsx scripts/e2e.ts",
     "typecheck": "tsc --noEmit",
@@ -13,7 +13,10 @@
     "test:consent": "tsx scripts/consent.test.ts",
     "test:datasharing": "tsx scripts/datasharing.test.ts",
     "test:store": "tsx scripts/store.test.ts",
-    "test:discovery": "tsx scripts/discovery.test.ts"
+    "test:discovery": "tsx scripts/discovery.test.ts",
+    "start": "node bin/faspkit.js",
+    "prepublishOnly": "npm run build",
+    "test:app": "tsx scripts/app.test.ts"
   },
   "keywords": [
     "fasp",
@@ -38,5 +41,24 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/isobutane101/faspkit"
+  },
+  "bin": {
+    "faspkit": "bin/faspkit.js"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "types": "dist/index.d.ts",
+  "engines": {
+    "node": ">=20"
   }
 }

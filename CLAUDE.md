@@ -10,11 +10,15 @@ Providers (FASPs)** — third-party services that fediverse servers (Mastodon an
 compatible) connect to for tasks a single instance can't do well alone: search,
 trends, follow recommendations, spam scoring, link previews.
 
-**The goal is the FASP layer**: everything a FASP needs between a fediverse
-server and whatever clever thing it does. Registration, signed transport,
-consent, getting content in, and answering the queries servers ask. faspkit
-implements that layer completely, and ships a deliberately simple reference
-index so it runs as a working FASP out of the box.
+**faspkit is an app first, a library second.** The primary user is a fediverse
+instance operator who wants to run a FASP — not a developer building one. That
+ordering decides arguments: if a change makes the library more elegant but
+`npx faspkit` harder to get working, the library loses.
+
+It implements the FASP layer completely — registration, signed transport,
+consent, ingest, and the queries servers ask — and ships a reference index so it
+runs as a real service out of the box. The parts remain usable on their own for
+anyone who wants to build their own FASP.
 
 The only official SDK is Ruby (`mastodon/fasp_ruby`). This is the TypeScript one.
 Strategic goal: become the reference implementation for non-Ruby FASP authors.
@@ -43,7 +47,12 @@ src/server.ts       createFasp(), registration handshake, signature middleware, 
 src/datasharing.ts  data_sharing capability: announcements, subscriptions, backfill.
 src/discovery.ts    account_search, trends, follow_recommendation. Protocol only.
 src/refindex.ts     Reference index that answers those three. In-memory, simple.
-src/index.ts        Public exports + a complete runnable FASP (FASPKIT_RUN=1).
+src/config.ts       Config + durable identity (actor keypair, admin token).
+src/app.ts          createFaspApp(): assembles the whole service.
+src/admin.ts        Admin auth and dashboard JSON API.
+src/adminpage.ts    The dashboard markup. No framework, no build step.
+src/cli.ts          `npx faspkit` argument parsing and startup banner.
+src/index.ts        Public exports.
 
 scripts/crypto.test.ts       Known-answer unit tests for the signature layer.
 scripts/consent.test.ts      Consent fixtures: public vs unlisted vs opted-out.
@@ -51,6 +60,7 @@ scripts/store.test.ts        Storage interface, encryption at rest, key rotation
 scripts/e2e.ts               Mock fediverse server + full handshake test.
 scripts/datasharing.test.ts  Announcements, consent gate, dedup, double-knocking.
 scripts/discovery.test.ts    The three query capabilities, and the layer end to end.
+scripts/app.test.ts          Durable identity, admin auth, dashboard API, CLI.
 ```
 
 Dependency direction is strictly `crypto.ts`/`consent.ts` <- `store.ts` <-
@@ -117,7 +127,7 @@ real Mastodon. They are the reason this library exists.
 
 ## Testing
 
-`npm test` runs six suites, 366 assertions in total, all passing:
+`npm test` runs seven suites, 431 assertions in total, all passing:
 
 - `scripts/crypto.test.ts` (63) — unit tests for the signature layer. A fixed
   keypair and a fixed `created` produce one exact signature base and one exact
@@ -141,6 +151,9 @@ real Mastodon. They are the reason this library exists.
   modern origin, a legacy cavage-only origin, and the FASP. Covers the
   announcement endpoint, the consent gate end to end, deduplication,
   double-knocking, deletes, backfill continuation, and revalidation.
+- `scripts/app.test.ts` (65) — the runnable app: that the actor keypair survives
+  a restart, that the dashboard is not open to the world, and that the connect
+  flow completes a real handshake.
 - `scripts/discovery.test.ts` (69) — the three query capabilities. Most of it is
   protocol edges, but section 6 runs the whole layer: content is announced,
   fetched from its origin, consent-gated, indexed, and queried back out over
@@ -172,10 +185,27 @@ end. Its ranking is intentionally obvious — count things in a window, scale to
 1..100. It is the baseline to beat, not an attempt to win, and a real deployment
 should implement the same provider signatures against its own search engine.
 
+## The app layer
+
+Two invariants here, both learned the hard way:
+
+1. **The actor keypair must be durable.** Remote servers fetch our actor
+   document, cache the public key, and verify our object fetches against it. A
+   keypair regenerated at boot silently breaks every signed fetch until their
+   caches expire. It lives in the store, not in memory.
+2. **The dashboard is never open.** It can register this FASP with other
+   servers. Auth is a token compared in constant time, generated on first run
+   and printed once, overridable with `FASPKIT_ADMIN_TOKEN`. The API must never
+   return private key material, even to an authenticated admin.
+
+The dashboard is deliberately plain HTML/CSS/JS in template strings. No
+framework, no bundler, no external assets — so `npx faspkit` needs no install
+beyond itself and works offline.
+
 ## What NOT to do
 
-- Do not add a web UI framework, ORM, or build tooling beyond tsc/tsx unless
-  explicitly asked. Scope creep kills SDKs.
+- Do not add a frontend framework, ORM, bundler, or build tooling beyond
+  tsc/tsx. The dashboard stays hand-written.
 - Do not make `refindex.ts` clever. If it starts growing a scoring model, that
   belongs in a separate package or the user's own provider.
 - Do not add a database dependency. Storage is deliberately dependency-free

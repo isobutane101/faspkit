@@ -250,12 +250,38 @@ v0.1 capabilities are implemented, so faspkit now covers the entire spec.
       objects and answers all three, so the layer runs and is testable end to
       end rather than being a set of interfaces.
 
+## Phase 7 — make it an app (done)
+
+Added after the goal was restated as *make this something people will use*. The
+library was complete but running it meant writing TypeScript.
+
+- [x] **7.1 Durable identity.** The actor keypair was being regenerated on every
+      boot, which silently breaks every signed fetch once a remote server has
+      cached the old public key. Keypair and admin token now persist in the
+      store, with the private halves encrypted at rest.
+- [x] **7.2 Admin dashboard.** Status, connected servers, the registration
+      flow with fingerprint comparison, backfill and subscribe buttons, and
+      search/trends previews. Hand-written HTML with no framework or build step.
+- [x] **7.3 Admin auth.** Token compared in constant time, generated on first
+      run and printed once. Session cookie is HttpOnly and SameSite. The API
+      never returns private key material.
+- [x] **7.4 CLI.** `npx faspkit` with flags and a startup banner that prints the
+      dashboard URL and first-run token, warns about a missing FASPKIT_SECRET,
+      and explains why localhost will not work for registration.
+- [x] **7.5 Packaging.** `bin`, `files`, `exports`, `types`, engines, and a
+      multi-stage Dockerfile that runs unprivileged with a healthcheck.
+
+Remaining for a real launch: publish to npm, and validate against a live
+Mastodon 4.4+ instance (phase 5). The suite mocks the other side of every
+exchange, so it catches protocol mistakes but not spec-vs-Mastodon divergence.
+
 ## Explicitly out of scope
 
 Do not build these without an explicit new instruction:
 
-- Admin web UI, dashboards, billing, or user accounts.
-- Any ORM, bundler, database driver, or framework beyond `tsc`/`tsx`.
+- Billing, multi-tenancy, or user accounts. The dashboard is single-operator.
+- Any ORM, bundler, database driver, or frontend framework. The dashboard is
+  hand-written HTML and stays that way.
 - ActivityPub server functionality beyond the server actor the spec requires.
   faspkit is a FASP, not a fediverse server.
 - A sophisticated ranking model in `refindex.ts`. It is a documented baseline;

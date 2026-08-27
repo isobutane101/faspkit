@@ -1,16 +1,139 @@
 # faspkit
 
-A TypeScript toolkit for building **Fediverse Auxiliary Service Providers** (FASPs) —
-third-party services that fediverse servers can plug into for tasks a single
-instance can't do well on its own (search, trends, spam detection, link previews).
+Run your own **Fediverse Auxiliary Service Provider** — the service a Mastodon
+server connects to for search, trends and follow recommendations that reach
+beyond what any single instance can see.
 
-Implements the [FASP general specification v0.1](https://github.com/mastodon/fediverse_auxiliary_service_provider_specifications)
-from Mastodon. The only official SDK today is Ruby (`mastodon/fasp_ruby`);
-this is the TypeScript one.
+```bash
+npx faspkit
+```
 
-**Every capability in the v0.1 spec is implemented.** `FASPKIT_RUN=1` starts a
-FASP that registers with an instance, ingests consented content from across the
-fediverse, and answers search, trends and follow-recommendation queries.
+That's the whole install. It prints an admin token and a dashboard URL, you open
+it, paste in your server's address, and compare a fingerprint. No config file,
+no database, no build step.
+
+---
+
+## What it does
+
+A fediverse server on its own only knows about content its own users have
+encountered. A FASP sees across many servers, so it can answer questions a
+single instance can't:
+
+- **Account search** — find people across the fediverse, not just those your
+  server already knows
+- **Trends** — hashtags, links and posts that are actually trending network-wide
+- **Follow recommendations** — accounts a user might want to follow
+
+faspkit implements the [FASP specification](https://github.com/mastodon/fediverse_auxiliary_service_provider_specifications)
+v0.1 in full, and runs as a complete service out of the box.
+
+## Getting started
+
+```bash
+npx faspkit --port 3000
+```
+
+Open the dashboard at the URL it prints, sign in with the token it shows, and
+use **Connect a server**. faspkit introduces itself to your fediverse server and
+shows you a fingerprint; you compare that fingerprint in your server's own admin
+interface and approve the registration. That comparison is the entire security
+model of registration — it is how you confirm you're approving faspkit and not
+someone impersonating it — so don't skip it.
+
+Then use **Backfill** to pull in existing content, or **Subscribe** to receive
+new posts as they're created.
+
+### Running it for real
+
+A fediverse server has to be able to reach your FASP, and the URL it reaches you
+at is part of every signature — so it must match exactly.
+
+```bash
+FASP_BASE_URL=https://fasp.example.com \
+FASPKIT_SECRET=$(openssl rand -base64 32) \
+NODE_ENV=production \
+npx faspkit --port 3000
+```
+
+`FASPKIT_SECRET` encrypts private keys at rest and is **required** in
+production. Back it up alongside your data directory: without it, the stored
+keys cannot be read.
+
+For local experimentation, use a tunnel (`ngrok`, `cloudflared`) rather than
+`localhost`, and pass the tunnel URL as `FASP_BASE_URL`. Signature verification
+covers the full request URI, so a mismatch between what you configure and what
+the other side calls produces 401s that are hard to diagnose.
+
+### Docker
+
+```bash
+docker build -t faspkit .
+docker run -p 3000:3000 -v faspkit-data:/data \
+  -e FASP_BASE_URL=https://fasp.example.com \
+  -e FASPKIT_SECRET=... -e NODE_ENV=production faspkit
+```
+
+### Options
+
+```
+--port <n>          Port to listen on (default 3000)
+--base-url <url>    Public URL other servers reach this FASP at
+--name <name>       Name shown to instance admins
+--username <name>   Actor username for WebFinger
+--data <dir>        Where to store keys and state (default ./data)
+--no-admin          Don't serve the dashboard
+```
+
+Environment: `PORT`, `FASP_BASE_URL`, `FASP_NAME`, `FASP_USERNAME`,
+`FASP_CONTACT_EMAIL`, `FASPKIT_DATA`, `FASPKIT_SECRET`, `FASPKIT_ADMIN_TOKEN`.
+
+## Consent
+
+Discovery infrastructure indexes things people wrote. faspkit refuses to index
+anything that hasn't been consented to, and enforces that itself rather than
+trusting the server that told it about the content:
+
+- Posts must be addressed **`to`** the public collection. Mastodon's "unlisted"
+  / "quiet public" posts are publicly fetchable but are **not** public in this
+  sense, and are rejected.
+- The author must have opted in to indexing via
+  [FEP-5feb](https://codeberg.org/fediverse/fep/src/branch/main/fep/5feb/fep-5feb.md).
+  A missing opt-in counts as a refusal.
+- Accounts additionally need `discoverable: true`.
+- Everything indexed is **re-checked at least weekly** and dropped when consent
+  is withdrawn, a post is deleted, or its visibility changes.
+
+A server announcing a URI is not permission to index it.
+
+## Using it as a library
+
+The service is assembled from parts you can use on their own. Swap the built-in
+index for your own search engine by supplying provider functions:
+
+```ts
+import { createFaspApp, trendsCapability } from "faspkit";
+
+const { listen } = await createFaspApp({
+  baseUrl: "https://fasp.example.com",
+  capabilities: [
+    trendsCapability({
+      hashtags: async ({ withinLastHours, maxCount, language }) =>
+        myEngine.trendingTags({ withinLastHours, maxCount, language }),
+    }),
+  ],
+});
+await listen();
+```
+
+faspkit implements the protocol — parameter parsing and validation, defaults,
+RFC 4647 language filtering, rank clamping and ordering, `Link: rel="next"`
+pagination, signed responses — and leaves ranking to you. That follows the spec,
+which declines to define how trends are computed and says implementations may
+compete on it.
+
+The signature layer (`crypto.ts`) is usable entirely on its own if you only want
+RFC 9421 HTTP Message Signatures with Ed25519.
 
 ## Status
 
@@ -22,168 +145,31 @@ fediverse, and answers search, trends and follow-recommendation queries.
 | `account_search` | done |
 | `trends` (content, hashtags, links) | done |
 | `follow_recommendation` | done |
-| `link_preview` | no spec exists yet — see the plan |
+| `link_preview` | no spec exists yet |
 
-Working: RFC 9421 HTTP Message Signatures (Ed25519), RFC 9530 Content-Digest,
-nodeinfo `faspBaseUrl` discovery, the full registration handshake, signed
-request/response middleware, replay protection, outbound rate-limit and timeout
-handling, private keys encrypted at rest, and key rotation with an overlap
-window.
+`npm test` runs 431 assertions with no network needed, against mock fediverse
+servers: known-answer tests pinning exact signature bytes, consent fixtures,
+storage and encryption, the full handshake, `data_sharing` end to end including
+double-knocking, all three query capabilities, and the app layer.
 
-`npm test` runs 366 assertions against mock fediverse servers, with no network
-needed: known-answer tests pinning the exact signature base and signature bytes,
-interop cases another implementation will send (arbitrary signature labels,
-several signatures in one header, parameters in any order, `alg`, extra covered
-components), and the rejections that matter — unsigned, tampered, stale,
-replayed, and wrong-`keyid` requests.
+**Not yet validated against a live Mastodon instance.** The test suite mocks the
+other side of every exchange, which catches protocol mistakes but cannot catch a
+divergence between the spec text and what Mastodon actually does. If you run it
+against a real server, findings are very welcome.
 
-The signature layer is the part worth having. Three things break every
-first-pass implementation, and all three are handled and tested here:
+Three things break most first-pass FASP implementations, and all three are
+handled and tested here: the spec exchanges **raw 32-byte Ed25519 keys** while
+Node exports SPKI/PKCS8 DER; **requests and responses cover different signature
+components**; and verification must run against the **raw request bytes**,
+because re-serializing JSON changes key order and breaks the digest.
 
-- The spec exchanges **raw 32-byte Ed25519 keys**, while Node exports SPKI and
-  PKCS8 DER. The 12- and 16-byte headers have to be stripped and re-added.
-- **Requests and responses cover different components.** Requests sign
-  `@method`, `@target-uri` and `content-digest`; responses sign `@status` and
-  `content-digest`.
-- Verification must run against the **raw request bytes**. Re-serializing the
-  JSON changes key order and breaks the digest.
+## Storage
 
-The `data_sharing` capability is implemented, including the parts that are easy
-to skip: fediverse servers announce object *URIs* only, so faspkit fetches each
-one itself over a signed request — double-knocking between RFC 9421 and the
-older draft-cavage signatures that most deployed software still verifies, behind
-an ActivityPub server actor with WebFinger — deduplicates it, and refuses to
-index anything that does not pass the consent gate.
-
-**Consent is deny-by-default and enforced independently of the announcing
-server.** A server telling faspkit about a URI is not permission to index it.
-Content is accepted only when it is addressed `to` the public collection *and*
-its author has opted in via [FEP-5feb](https://codeberg.org/fediverse/fep/src/branch/main/fep/5feb/fep-5feb.md);
-accounts additionally need `discoverable: true`. Mastodon's "unlisted" / "quiet
-public" posts are publicly fetchable and are rejected, which is the case a
-naive implementation gets wrong. A missing opt-in attribute counts as a refusal,
-never a pass.
-
-Consent is also re-checked over time, as the spec requires: indexed objects are
-revalidated against their origin at least weekly and dropped when an author
-withdraws consent, makes a post followers-only, or deletes it. Private keys are
-encrypted at rest with AES-256-GCM, and an instance's signing key can be rotated
-with an overlap window so requests already in flight are not rejected.
-
-### Protocol, not algorithm
-
-The three query capabilities implement the protocol — parameter parsing and
-validation, defaults, RFC 4647 language filtering, rank clamping and ordering,
-`Link: rel="next"` pagination, signed responses — and delegate the actual
-searching and ranking to a provider function you supply:
-
-```ts
-trendsCapability({
-  hashtags: async ({ withinLastHours, maxCount, language }) => [
-    { name: "#fediscovery", rank: 100, examples: ["https://fedi.example/status/23"] },
-  ],
-});
-```
-
-This follows the spec, which declines to define how trends are computed and says
-implementations may compete on it. faspkit ships `createReferenceIndex()` as a
-working baseline so the layer runs out of the box; swap in your own provider to
-build a real FASP.
-
-### Storage
-
-No database required. `FaspStore` is an async interface with a JSON adapter that
-caches in memory and writes through atomically. That assumes one process owns
-the data directory — a multi-instance deployment should implement the same
-interface against a shared database.
-
-See [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) for what's next.
-
-## Quick start
-
-```bash
-npm install
-npm test              # 366 assertions, no network needed
-npm run test:crypto   # signature layer only
-npm run test:consent  # consent gate fixtures
-npm run typecheck
-FASPKIT_RUN=1 npm run dev
-```
-
-### Base URLs with a path
-
-If your FASP lives at `https://example.com/fasp/v1` rather than at the root of a
-host, pass that as `baseUrl`. Routes mount under the prefix and `@target-uri` is
-reconstructed to match, as the spec requires. Getting this wrong is a common
-source of signatures that verify locally and fail in production, so it is
-covered end to end in the test suite.
-
-## Building a capability
-
-```ts
-import { createFasp, sendSigned, Capability } from "faspkit";
-
-const spamScore: Capability = {
-  id: "spam_score",
-  version: "0.1",
-  register(router) {
-    // Every route registered here already requires a valid signature,
-    // and req.faspServer is the authenticated fediverse server.
-    router.post("/spam_score/v0/score", async (req, res) => {
-      const score = await classify(req.body.content);
-      sendSigned(req, res, 200, { score });
-    });
-  },
-};
-
-createFasp({
-  name: "My FASP",
-  baseUrl: "https://fasp.example.com",
-  privacyPolicy: [{ url: "https://fasp.example.com/privacy", language: "en" }],
-  capabilities: [spamScore],
-}).listen(3000);
-```
-
-## Testing against real Mastodon
-
-FASP support is behind a feature flag in Mastodon 4.4+:
-
-```bash
-EXPERIMENTAL_FEATURES=fasp bin/dev
-```
-
-Then in the admin UI, the FASP section lists registration requests. Your FASP
-posts to `/registration`, the admin compares your public-key fingerprint, accepts,
-and selects capabilities.
-
-**Note on local dev:** the spec allows relaxing the HTTPS requirement in
-development environments, but both sides must agree on the exact `@target-uri`
-string when signing — a proxy that rewrites scheme or host will break signature
-verification. Use a tunnel (ngrok/cloudflared) rather than plain localhost if
-you hit mismatches.
-
-## Implementation notes
-
-Three things that bite people implementing this spec:
-
-1. **Keys are raw, not PEM.** The spec exchanges base64-encoded 32-byte Ed25519
-   keys. Node's `crypto` exports SPKI/PKCS8 DER, so you must strip the 12-byte
-   (public) and 16-byte (private) headers. See `src/crypto.ts`.
-2. **Requests and responses sign different components.** Requests cover
-   `@method`, `@target-uri`, `content-digest`; responses cover `@status` and
-   `content-digest`. Getting this backwards produces signatures that verify
-   locally and fail against Mastodon.
-3. **You need the raw body bytes.** Verify against the exact bytes received, not
-   a re-serialized JSON object — key order changes break the digest.
-
-## Roadmap
-
-- [ ] `trends`, `account_search`, `follow_recommendation` capabilities (specs exist)
-- [ ] Data-sharing spec (backfill + continuous event stream) with consent flags:
-      public content only, `discoverable`/`indexable`, server- and user-level blocks
-- [ ] Draft a `link_preview` capability spec and open a PR upstream
-- [ ] Postgres store, multi-tenant admin UI, key rotation
+No database required. State lives in a JSON store that caches in memory and
+writes through atomically, which assumes one process owns the data directory.
+For multi-instance deployments, implement the async `FaspStore` interface
+against a shared database — that's why it's async.
 
 ## License
 
-AGPL-3.0 — matching the norms of the fediverse tooling ecosystem.
+AGPL-3.0

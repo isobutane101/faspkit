@@ -79,6 +79,14 @@ export interface FaspStore {
   forgetSeen(uri: string): Promise<void>;
   seenCount(): Promise<number>;
 
+  /**
+   * Durable key/value settings for the instance itself — the ActivityPub actor
+   * keypair, the admin token. Values whose key ends in `PrivateKey` are
+   * encrypted at rest alongside the per-server keys.
+   */
+  getSetting(key: string): Promise<string | undefined>;
+  setSetting(key: string, value: string): Promise<void>;
+
   /** Note that a URI passed the consent gate and is now indexed. */
   recordIndexed(uri: string, category: IndexedCategory): Promise<void>;
   /** Indexed records, oldest check first; `checkedBefore` filters by due date. */
@@ -141,6 +149,7 @@ export function createJsonStore(options: JsonStoreOptions = {}): FaspStore {
   let servers: Record<string, ServerRecord> | undefined;
   let seen: Record<string, string> | undefined;
   let indexed: Record<string, IndexedRecord> | undefined;
+  let settings: Record<string, string> | undefined;
 
   function invalidateIfMoved() {
     const dir = dataDir();
@@ -149,6 +158,7 @@ export function createJsonStore(options: JsonStoreOptions = {}): FaspStore {
     servers = undefined;
     seen = undefined;
     indexed = undefined;
+    settings = undefined;
   }
 
   function readJson<T>(file: string, fallback: T): T {
@@ -200,6 +210,14 @@ export function createJsonStore(options: JsonStoreOptions = {}): FaspStore {
     invalidateIfMoved();
     return (seen ??= readJson<Record<string, string>>(path.join(dataDir(), "seen.json"), {}));
   }
+
+  function loadSettings(): Record<string, string> {
+    invalidateIfMoved();
+    return (settings ??= readJson<Record<string, string>>(path.join(dataDir(), "settings.json"), {}));
+  }
+
+  /** Anything that looks like a private key is sealed, same as server records. */
+  const isSecretSetting = (key: string) => /privatekey$|secret$|token$/i.test(key);
 
   function loadIndexed(): Record<string, IndexedRecord> {
     invalidateIfMoved();
@@ -291,6 +309,18 @@ export function createJsonStore(options: JsonStoreOptions = {}): FaspStore {
 
     async seenCount() {
       return Object.keys(loadSeen()).length;
+    },
+
+    async getSetting(key) {
+      const raw = loadSettings()[key];
+      if (raw === undefined) return undefined;
+      return isSecretSetting(key) ? secretBox().open(raw) : raw;
+    },
+
+    async setSetting(key, value) {
+      const current = loadSettings();
+      current[key] = isSecretSetting(key) ? secretBox().seal(value) : value;
+      writeJson("settings.json", current);
     },
 
     async recordIndexed(uri, category) {
