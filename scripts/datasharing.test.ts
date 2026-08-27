@@ -30,6 +30,9 @@ import {
   requestBackfill,
   continueBackfill,
   retrieveWithConsent,
+  revalidate,
+  startRevalidation,
+  REVALIDATION_INTERVAL_MS,
   ProcessedObject,
   AnnouncementContext,
   DataSharingError,
@@ -132,14 +135,15 @@ origin.use((req, res, next) => {
   next();
 });
 
-const alice = { id: ALICE, type: "Person", preferredUsername: "alice", indexable: true, discoverable: true };
+let aliceIndexable = true;
+const alice = () => ({ id: ALICE, type: "Person", preferredUsername: "alice", indexable: aliceIndexable, discoverable: true });
 const bob = { id: BOB, type: "Person", preferredUsername: "bob", indexable: false, discoverable: false };
 
 const note = (id: string, author: string, to: string[], cc: string[] = []) => ({
   id: `${ORIGIN_URL}${id}`, type: "Note", attributedTo: author, to, cc, content: "hi",
 });
 
-origin.get("/users/alice", (_req, res) => res.json(alice));
+origin.get("/users/alice", (_req, res) => res.json(alice()));
 origin.get("/users/bob", (_req, res) => res.json(bob));
 origin.get("/statuses/public", (_req, res) => res.json(note("/statuses/public", ALICE, [PUBLIC], [`${ALICE}/followers`])));
 origin.get("/statuses/unlisted", (_req, res) => res.json(note("/statuses/unlisted", ALICE, [`${ALICE}/followers`], [PUBLIC])));
@@ -466,6 +470,70 @@ async function main() {
       JSON.stringify({ fresh: updateCtx.freshUris, dup: updateCtx.duplicateUris }));
     check("the changed object is refetched", fetchCounts["/statuses/public"] === 2,
       JSON.stringify(fetchCounts));
+  }
+
+  console.log("\n11. revalidation");
+  {
+    check("the spec floor is one week", REVALIDATION_INTERVAL_MS === 7 * 24 * 60 * 60 * 1000);
+
+    // Index a fresh public post by an opted-in author.
+    accepted.length = 0;
+    const uri = `${ORIGIN_URL}/statuses/revalidate-me`;
+    origin.get("/statuses/revalidate-me", (_req, res) =>
+      res.json({ id: uri, type: "Note", attributedTo: ALICE, to: [PUBLIC], content: "hi" }));
+    await announce({
+      source: { subscription: { id: "3446" } }, category: "content", eventType: "new", objectUris: [uri],
+    }, faspId);
+    check("the object is accepted and indexed", await waitFor(() => accepted.some((a) => a.uri === uri)),
+      JSON.stringify(rejected.map((r) => [r.uri, r.reason])));
+    check("an accepted object is recorded for revalidation",
+      (await defaultStore.listIndexed()).some((r) => r.uri === uri));
+
+    // Nothing is due yet, so a pass does no work.
+    const idle = await revalidate({ identity, store: defaultStore });
+    check("nothing is due immediately after indexing", idle.checked === 0, JSON.stringify(idle));
+
+    // Backdate the check clock to make this record due, rather than relying on
+    // maxAgeMs: 0 plus millisecond timing to decide what counts as overdue.
+    const weekAgo = () => new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+    await defaultStore.markRevalidated(uri, weekAgo());
+
+    const revoked: string[] = [];
+    const revalidated: string[] = [];
+    const fresh = await revalidate({
+      identity, store: defaultStore, maxAgeMs: 0,
+      handlers: { onRevoked: (u) => { revoked.push(u); }, onRevalidated: (o) => { revalidated.push(o.uri); } },
+    });
+    check("a due pass re-checks the object", fresh.checked > 0, JSON.stringify(fresh));
+    check("it is still allowed", revalidated.includes(uri), JSON.stringify({ revalidated, revoked }));
+    check("and is not revoked", !revoked.includes(uri));
+    check("the check clock was reset",
+      (await defaultStore.listIndexed({ checkedBefore: new Date(Date.now() - 1000) })).every((r) => r.uri !== uri));
+
+    // The acceptance case: the author withdraws consent.
+    aliceIndexable = false;
+    revoked.length = 0; revalidated.length = 0;
+    await defaultStore.markRevalidated(uri, weekAgo());
+    const afterOptOut = await revalidate({
+      identity, store: defaultStore, maxAgeMs: 0,
+      handlers: { onRevoked: (u) => { revoked.push(u); }, onRevalidated: (o) => { revalidated.push(o.uri); } },
+    });
+    check("an author opting out revokes their indexed content", revoked.includes(uri),
+      JSON.stringify({ revoked, revalidated, afterOptOut }));
+    check("the revoked record is dropped from the index",
+      !(await defaultStore.listIndexed()).some((r) => r.uri === uri));
+    check("and from the dedup set, so it can return if consent comes back",
+      !(await defaultStore.hasSeen(uri)));
+    check("the summary counts it", afterOptOut.revoked >= 1, JSON.stringify(afterOptOut));
+    aliceIndexable = true;
+
+    // A limited pass takes the most overdue first, so a large index drains.
+    const limited = await revalidate({ identity, store: defaultStore, maxAgeMs: 0, limit: 1 });
+    check("limit caps how much one pass does", limited.checked <= 1, JSON.stringify(limited));
+
+    const stop = startRevalidation({ identity, store: defaultStore, everyMs: 60_000 });
+    check("startRevalidation returns a stop function", typeof stop === "function");
+    stop();
   }
 
   console.log(`\n${pass} passed, ${fail} failed\n`);

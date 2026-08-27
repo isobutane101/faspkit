@@ -154,7 +154,45 @@ async function main() {
     check("markSeen preserves order", (await store.markSeen(["z", "y", "x"])).join() === "z,y,x");
   }
 
-  console.log("\n5. key rotation");
+  console.log("\n5. indexed records (revalidation bookkeeping)");
+  {
+    const store = createJsonStore({ dataDir: scratch(), secretBox: plaintextSecretBox() });
+    await store.recordIndexed("https://a.example/1", "content");
+    await store.recordIndexed("https://a.example/2", "account");
+
+    check("indexedCount counts", (await store.indexedCount()) === 2);
+    const all = await store.listIndexed();
+    check("records carry their category", all.find((r) => r.uri.endsWith("/2"))?.category === "account");
+    check("records are timestamped", all.every((r) => !!r.indexedAt && !!r.lastCheckedAt));
+
+    check("nothing is due against an old cutoff",
+      (await store.listIndexed({ checkedBefore: new Date(Date.now() - 60_000) })).length === 0);
+    check("everything is due against a future cutoff",
+      (await store.listIndexed({ checkedBefore: new Date(Date.now() + 60_000) })).length === 2);
+    check("limit caps the result", (await store.listIndexed({ limit: 1 })).length === 1);
+
+    // Re-indexing keeps the original indexedAt but refreshes the check clock.
+    const before = (await store.listIndexed()).find((r) => r.uri.endsWith("/1"))!;
+    await new Promise((r) => setTimeout(r, 5));
+    await store.recordIndexed("https://a.example/1", "content");
+    const after = (await store.listIndexed()).find((r) => r.uri.endsWith("/1"))!;
+    check("re-indexing preserves indexedAt", after.indexedAt === before.indexedAt);
+    check("re-indexing refreshes lastCheckedAt", after.lastCheckedAt >= before.lastCheckedAt);
+
+    // Oldest check first, so a limited pass always drains the most overdue.
+    await store.markRevalidated("https://a.example/1", new Date(Date.now() - 10_000));
+    check("the most overdue record comes first",
+      (await store.listIndexed({ limit: 1 }))[0].uri === "https://a.example/1");
+
+    await store.removeIndexed("https://a.example/1");
+    check("removeIndexed drops it", (await store.indexedCount()) === 1);
+    await store.removeIndexed("https://a.example/1");
+    check("removing twice is harmless", (await store.indexedCount()) === 1);
+    await store.markRevalidated("https://nope.example/x");
+    check("revalidating an unknown uri is harmless", (await store.indexedCount()) === 1);
+  }
+
+  console.log("\n6. key rotation");
   {
     const store = createJsonStore({ dataDir: scratch(), secretBox: plaintextSecretBox() });
     const rec = await store.createServer("https://fedi.example", "https://fedi.example/fasp");

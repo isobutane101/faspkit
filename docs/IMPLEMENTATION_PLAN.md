@@ -177,7 +177,7 @@ opted in, and that loop is not built. It needs a persistent record of what was
 indexed and when, which is really Phase 2 storage work — so it is listed here
 rather than silently dropped:
 
-- [ ] **3.5 Weekly revalidation.** Re-fetch indexed objects and accounts at
+- [x] **3.5 Weekly revalidation.** Re-fetch indexed objects and accounts at
       least once a week, re-run the consent gate, apply updates, and remove
       anything that is no longer public or no longer opted in. Objects covered
       by a live subscription MAY skip the week's check.

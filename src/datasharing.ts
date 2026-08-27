@@ -247,6 +247,18 @@ export interface DataSharingHandlers {
   onDelete?: (uri: string, ctx: AnnouncementContext) => void | Promise<void>;
   /** Called on a backfill announcement that says more content is available. */
   onMoreAvailable?: (backfillRequestId: string, ctx: AnnouncementContext) => void | Promise<void>;
+  /**
+   * Called when a revalidation pass finds that something already indexed may no
+   * longer be indexed — the author withdrew consent, the post was deleted, or
+   * its visibility changed. Remove it from your index.
+   */
+  onRevoked?: (uri: string, reason: string) => void | Promise<void>;
+  /**
+   * Called when a revalidation pass confirms an object may still be indexed.
+   * The document may have changed since it was indexed, and the spec requires
+   * applying those changes, so it is handed back in full.
+   */
+  onRevalidated?: (obj: ProcessedObject) => void | Promise<void>;
 }
 
 function parseAnnouncement(body: unknown): Announcement | string {
@@ -369,6 +381,8 @@ export function dataSharingCapability(opts: DataSharingOptions): Capability {
               actorCache,
             });
             if (result.accepted) {
+              // Remember it so the revalidation pass can re-check it later.
+              await store.recordIndexed(uri, parsed.category);
               await handlers.onAccepted?.(result, ctx);
             } else {
               // A rejected URI stays in the seen set on purpose. Dropping it
@@ -387,4 +401,102 @@ export function dataSharingCapability(opts: DataSharingOptions): Capability {
       });
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Revalidation
+// ---------------------------------------------------------------------------
+
+/** The spec's floor: re-check anything indexed at least once a week. */
+export const REVALIDATION_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+
+export interface RevalidateOptions extends Omit<RetrievalOptions, "actorCache"> {
+  store?: FaspStore;
+  handlers?: Pick<DataSharingHandlers, "onRevalidated" | "onRevoked">;
+  /** How stale a record must be before it is re-checked. Default one week. */
+  maxAgeMs?: number;
+  /** Cap on records processed in one pass, so a large index is spread out. */
+  limit?: number;
+}
+
+export interface RevalidationSummary {
+  checked: number;
+  stillAllowed: number;
+  revoked: number;
+}
+
+/**
+ * Re-check indexed objects against their origin and drop what may no longer be
+ * indexed.
+ *
+ * Consent is not a one-time decision: an author can flip `indexable` off, make
+ * a post followers-only, or delete it, and none of that necessarily reaches us
+ * as an event. The spec therefore requires a periodic re-check, and this is it.
+ *
+ * A retrieval failure revokes. That is deliberate and errs toward deleting
+ * rather than keeping: an object we can no longer fetch is one whose consent we
+ * can no longer demonstrate. A transient outage costs a re-index later, which
+ * is the cheaper mistake.
+ */
+export async function revalidate(opts: RevalidateOptions): Promise<RevalidationSummary> {
+  const store = opts.store ?? defaultStore;
+  const handlers = opts.handlers ?? {};
+  const cutoff = new Date(Date.now() - (opts.maxAgeMs ?? REVALIDATION_INTERVAL_MS));
+  const due = await store.listIndexed({ checkedBefore: cutoff, limit: opts.limit });
+
+  const actorCache = new Map<string, JsonObject>();
+  const summary: RevalidationSummary = { checked: 0, stillAllowed: 0, revoked: 0 };
+
+  for (const record of due) {
+    summary.checked++;
+    const result = await retrieveWithConsent(record.uri, record.category, { ...opts, actorCache });
+
+    if (result.accepted) {
+      summary.stillAllowed++;
+      await store.markRevalidated(record.uri);
+      // Content may have changed since it was indexed; hand it back so the
+      // caller can update, as the spec requires.
+      await handlers.onRevalidated?.(result);
+      continue;
+    }
+
+    summary.revoked++;
+    const reason = result.reason ?? "no longer passes the consent gate";
+    console.log(`[data_sharing] revoking ${record.uri}: ${reason}`);
+    await store.removeIndexed(record.uri);
+    // Drop it from the dedup set too, so it can be picked up again if the
+    // author opts back in and a server re-announces it.
+    await store.forgetSeen(record.uri);
+    await handlers.onRevoked?.(record.uri, reason);
+  }
+
+  return summary;
+}
+
+/**
+ * Run `revalidate` on a timer. Returns a function that stops it.
+ *
+ * The timer is unref'd so it never keeps a process alive on its own.
+ */
+export function startRevalidation(
+  opts: RevalidateOptions & { everyMs?: number },
+): () => void {
+  const everyMs = opts.everyMs ?? 60 * 60 * 1000;
+  let running = false;
+
+  const tick = async () => {
+    if (running) return; // A slow pass must not overlap itself.
+    running = true;
+    try {
+      await revalidate(opts);
+    } catch (err) {
+      console.error("[data_sharing] revalidation pass failed:", err);
+    } finally {
+      running = false;
+    }
+  };
+
+  const timer = setInterval(tick, everyMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }

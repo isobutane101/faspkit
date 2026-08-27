@@ -42,6 +42,23 @@ export function acceptableTheirKeys(rec: ServerRecord, now = new Date()): string
   return keys;
 }
 
+/** Categories of object a FASP may index. Mirrors data_sharing's `category`. */
+export type IndexedCategory = "content" | "account";
+
+/**
+ * What we have indexed and when we last confirmed it may still be indexed.
+ *
+ * The spec requires re-checking at least weekly that content is still public
+ * and its author still consents. That is impossible without remembering what
+ * was indexed in the first place, which is what this records.
+ */
+export interface IndexedRecord {
+  uri: string;
+  category: IndexedCategory;
+  indexedAt: string;
+  lastCheckedAt: string;
+}
+
 /**
  * Persistence for server records, keys, and the dedup seen-set.
  *
@@ -61,6 +78,16 @@ export interface FaspStore {
   hasSeen(uri: string): Promise<boolean>;
   forgetSeen(uri: string): Promise<void>;
   seenCount(): Promise<number>;
+
+  /** Note that a URI passed the consent gate and is now indexed. */
+  recordIndexed(uri: string, category: IndexedCategory): Promise<void>;
+  /** Indexed records, oldest check first; `checkedBefore` filters by due date. */
+  listIndexed(opts?: { checkedBefore?: Date; limit?: number }): Promise<IndexedRecord[]>;
+  /** Reset a record's revalidation clock. */
+  markRevalidated(uri: string, at?: Date): Promise<void>;
+  /** Forget an indexed record, e.g. because consent was withdrawn. */
+  removeIndexed(uri: string): Promise<void>;
+  indexedCount(): Promise<number>;
 }
 
 export function newId(): string {
@@ -138,6 +165,8 @@ export function createJsonStore(options: JsonStoreOptions = {}): FaspStore {
   }
 
   const loadSeen = () => readJson<Record<string, string>>(seenPath(), {});
+  const indexedPath = () => path.join(dataDir(), "indexed.json");
+  const loadIndexed = () => readJson<Record<string, IndexedRecord>>(indexedPath(), {});
 
   return {
     async createServer(serverUrl, baseUrl) {
@@ -204,6 +233,44 @@ export function createJsonStore(options: JsonStoreOptions = {}): FaspStore {
 
     async seenCount() {
       return Object.keys(loadSeen()).length;
+    },
+
+    async recordIndexed(uri, category) {
+      const indexed = loadIndexed();
+      const at = new Date().toISOString();
+      // Re-indexing an object refreshes its check clock but keeps the original
+      // indexedAt, so the record still says how long we have held it.
+      indexed[uri] = { uri, category, indexedAt: indexed[uri]?.indexedAt ?? at, lastCheckedAt: at };
+      writeJson(indexedPath(), indexed);
+    },
+
+    async listIndexed(opts = {}) {
+      let records = Object.values(loadIndexed());
+      if (opts.checkedBefore) {
+        const cutoff = opts.checkedBefore.getTime();
+        records = records.filter((r) => new Date(r.lastCheckedAt).getTime() < cutoff);
+      }
+      // Oldest check first, so a limited pass always drains the most overdue.
+      records.sort((a, b) => a.lastCheckedAt.localeCompare(b.lastCheckedAt));
+      return opts.limit === undefined ? records : records.slice(0, opts.limit);
+    },
+
+    async markRevalidated(uri, at = new Date()) {
+      const indexed = loadIndexed();
+      if (!indexed[uri]) return;
+      indexed[uri] = { ...indexed[uri], lastCheckedAt: at.toISOString() };
+      writeJson(indexedPath(), indexed);
+    },
+
+    async removeIndexed(uri) {
+      const indexed = loadIndexed();
+      if (!(uri in indexed)) return;
+      delete indexed[uri];
+      writeJson(indexedPath(), indexed);
+    },
+
+    async indexedCount() {
+      return Object.keys(loadIndexed()).length;
     },
   };
 }

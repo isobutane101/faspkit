@@ -110,7 +110,7 @@ real Mastodon. They are the reason this library exists.
 
 ## Testing
 
-`npm test` runs five suites, 267 assertions in total, all passing:
+`npm test` runs five suites, 293 assertions in total, all passing:
 
 - `scripts/crypto.test.ts` (63) — unit tests for the signature layer. A fixed
   keypair and a fixed `created` produce one exact signature base and one exact
@@ -123,17 +123,17 @@ real Mastodon. They are the reason this library exists.
   public, unlisted, followers-only, opted-out, and mismatched-author documents.
   These are the assertions with real consequences for real people; every
   plausible way a document could sneak past is asserted to fail closed.
-- `scripts/store.test.ts` (51) — the storage interface, AES-256-GCM encryption
-  at rest, and key rotation. Includes an assertion that reads the file back off
+- `scripts/store.test.ts` (63) — the storage interface, AES-256-GCM encryption
+  at rest, key rotation, and revalidation bookkeeping. Includes an assertion that reads the file back off
   disk and confirms the private key is not in it.
 - `scripts/e2e.ts` (45) — spins up a mock fediverse server and a FASP mounted
   under a base URL *with* path segments (`/fasp/v1`), then runs the handshake,
   a signed round-trip, a signed `GET` with a query string, replay rejection,
   outbound `429`/timeout handling, and the negative cases.
-- `scripts/datasharing.test.ts` (58) — four servers: the registered instance, a
+- `scripts/datasharing.test.ts` (72) — four servers: the registered instance, a
   modern origin, a legacy cavage-only origin, and the FASP. Covers the
   announcement endpoint, the consent gate end to end, deduplication,
-  double-knocking, deletes, and backfill continuation.
+  double-knocking, deletes, backfill continuation, and revalidation.
 
 Run `npm run test:crypto`, `test:consent`, `test:store`, `test:e2e` or
 `test:datasharing` to run one of them.
@@ -169,12 +169,11 @@ discovery, the `debug/callback` capability, the JSON store, CI, and the full
 the consent gate, deduplication, and signed object retrieval with
 double-knocking behind an ActivityPub server actor.
 
-**Known gap:** the spec requires re-checking indexed content and accounts at
-least weekly, to confirm they are still public and still opted in. That
-revalidation loop is not implemented. Anything built on top of `data_sharing`
-needs it before it indexes real data.
+Also working: the `FaspStore` interface with a JSON adapter, AES-256-GCM
+encryption of private keys at rest, key rotation with an overlap window, and the
+periodic revalidation the spec requires — indexed objects are re-checked against
+their origin and dropped when consent is withdrawn.
 
-Not built yet: the weekly revalidation loop, `trends`, `account_search`,
-`follow_recommendation`, the storage interface and Postgres adapter, key
-encryption at rest, key rotation. See `docs/IMPLEMENTATION_PLAN.md` phases 2, 4
-and 5.
+Not built yet: the Postgres adapter (task 2.2 — deliberately paused, `pg` would
+be the first runtime dependency beyond Express), `trends`, `account_search`,
+`follow_recommendation`. See `docs/IMPLEMENTATION_PLAN.md` phases 2, 4 and 5.

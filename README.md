@@ -15,7 +15,7 @@ nodeinfo `faspBaseUrl` discovery, the full registration handshake, signed
 request/response middleware, replay protection, outbound rate-limit and timeout
 handling, and the `debug/callback` capability.
 
-`npm test` runs 210 assertions against mock fediverse servers, with no network
+`npm test` runs 293 assertions against mock fediverse servers, with no network
 needed: known-answer tests pinning the exact signature base and signature bytes,
 interop cases another implementation will send (arbitrary signature labels,
 several signatures in one header, parameters in any order, `alg`, extra covered
@@ -49,15 +49,21 @@ public" posts are publicly fetchable and are rejected, which is the case a
 naive implementation gets wrong. A missing opt-in attribute counts as a refusal,
 never a pass.
 
-Not built yet: the spec's weekly revalidation of indexed content, `trends`,
-`account_search`, `follow_recommendation`, and a Postgres store. See
+Consent is also re-checked over time, as the spec requires: indexed objects are
+revalidated against their origin at least weekly and dropped when an author
+withdraws consent, makes a post followers-only, or deletes it. Private keys are
+encrypted at rest with AES-256-GCM, and an instance's signing key can be rotated
+with an overlap window so requests already in flight are not rejected.
+
+Not built yet: `trends`, `account_search`, `follow_recommendation`, and a
+Postgres store adapter. See
 [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md).
 
 ## Quick start
 
 ```bash
 npm install
-npm test              # 210 assertions, no network needed
+npm test              # 293 assertions, no network needed
 npm run test:crypto   # signature layer only
 npm run test:consent  # consent gate fixtures
 npm run typecheck
