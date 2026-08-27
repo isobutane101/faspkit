@@ -15,7 +15,7 @@ nodeinfo `faspBaseUrl` discovery, the full registration handshake, signed
 request/response middleware, replay protection, outbound rate-limit and timeout
 handling, and the `debug/callback` capability.
 
-`npm test` runs 206 assertions against mock fediverse servers, with no network
+`npm test` runs 210 assertions against mock fediverse servers, with no network
 needed: known-answer tests pinning the exact signature base and signature bytes,
 interop cases another implementation will send (arbitrary signature labels,
 several signatures in one header, parameters in any order, `alg`, extra covered
@@ -57,7 +57,7 @@ Not built yet: the spec's weekly revalidation of indexed content, `trends`,
 
 ```bash
 npm install
-npm test              # 206 assertions, no network needed
+npm test              # 210 assertions, no network needed
 npm run test:crypto   # signature layer only
 npm run test:consent  # consent gate fixtures
 npm run typecheck

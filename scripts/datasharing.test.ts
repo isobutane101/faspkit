@@ -332,9 +332,9 @@ async function main() {
     check("post by an opted-out author rejected via FEP-5feb", reasonFor("by-bob").includes("FEP-5feb"), reasonFor("by-bob"));
     check("unfetchable object rejected, not skipped silently", reasonFor("missing").length > 0, reasonFor("missing"));
 
-    // A rejected URI must not stay in the seen set, or the author opting in
-    // later would never take effect.
-    check("rejected URIs are not left marked as seen", !hasSeen(`${ORIGIN_URL}/statuses/unlisted`));
+    // A rejected URI stays recorded, so the origin is not re-fetched every
+    // time another connected server mentions the same object.
+    check("rejected URIs stay in the seen set", hasSeen(`${ORIGIN_URL}/statuses/unlisted`));
   }
 
   console.log("\n6. accepted content");
@@ -435,18 +435,37 @@ async function main() {
   console.log("\n10. deduplication across servers");
   {
     accepted.length = 0; rejected.length = 0;
-    const uri = `${ORIGIN_URL}/statuses/shared`;
+    fetchCounts = {};
+    const uri = `${ORIGIN_URL}/statuses/public`;
     const ctxBefore = announcements.length;
     // The same URI announced twice, as two connected servers would.
     await announce({ source: { subscription: { id: "3446" } }, category: "content", eventType: "new", objectUris: [uri] }, faspId);
     await waitFor(() => announcements.length > ctxBefore);
     await announce({ source: { subscription: { id: "3446" } }, category: "content", eventType: "new", objectUris: [uri] }, faspId);
     await waitFor(() => announcements.length > ctxBefore + 1);
+    await waitFor(() => accepted.length >= 1);
 
+    const first = announcements.at(-2)!;
     const second = announcements.at(-1)!;
+    check("the first announcement treats the URI as fresh", first.freshUris.includes(uri),
+      JSON.stringify({ fresh: first.freshUris, dup: first.duplicateUris }));
     check("the second announcement reports the URI as a duplicate", second.duplicateUris.includes(uri),
       JSON.stringify({ fresh: second.freshUris, dup: second.duplicateUris }));
     check("the second announcement has nothing fresh to retrieve", second.freshUris.length === 0);
+    check("the object was fetched exactly once", fetchCounts["/statuses/public"] === 1,
+      JSON.stringify(fetchCounts));
+
+    // `update` exists to say a known object changed, so it must not be deduped
+    // away — that notification is the only one we get.
+    const beforeUpdate = announcements.length;
+    await announce({ source: { subscription: { id: "3446" } }, category: "content", eventType: "update", objectUris: [uri] }, faspId);
+    await waitFor(() => announcements.length > beforeUpdate);
+    await waitFor(() => (fetchCounts["/statuses/public"] ?? 0) >= 2);
+    const updateCtx = announcements.at(-1)!;
+    check("an update event bypasses deduplication", updateCtx.freshUris.includes(uri),
+      JSON.stringify({ fresh: updateCtx.freshUris, dup: updateCtx.duplicateUris }));
+    check("the changed object is refetched", fetchCounts["/statuses/public"] === 2,
+      JSON.stringify(fetchCounts));
   }
 
   console.log(`\n${pass} passed, ${fail} failed\n`);

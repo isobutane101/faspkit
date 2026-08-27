@@ -105,7 +105,7 @@ real Mastodon. They are the reason this library exists.
 
 ## Testing
 
-`npm test` runs four suites, 206 assertions in total, all passing:
+`npm test` runs four suites, 210 assertions in total, all passing:
 
 - `scripts/crypto.test.ts` (63) — unit tests for the signature layer. A fixed
   keypair and a fixed `created` produce one exact signature base and one exact
@@ -122,7 +122,7 @@ real Mastodon. They are the reason this library exists.
   under a base URL *with* path segments (`/fasp/v1`), then runs the handshake,
   a signed round-trip, a signed `GET` with a query string, replay rejection,
   outbound `429`/timeout handling, and the negative cases.
-- `scripts/datasharing.test.ts` (54) — four servers: the registered instance, a
+- `scripts/datasharing.test.ts` (58) — four servers: the registered instance, a
   modern origin, a legacy cavage-only origin, and the FASP. Covers the
   announcement endpoint, the consent gate end to end, deduplication,
   double-knocking, deletes, and backfill continuation.

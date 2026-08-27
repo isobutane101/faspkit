@@ -319,18 +319,22 @@ export function dataSharingCapability(opts: DataSharingOptions): Capability {
 
         const server = req.faspServer!;
 
-        // Deduplicate first: the same object reaches us from every connected
-        // server that has seen it, and re-fetching it wastes the origin's
-        // bandwidth as much as ours.
+        // Deduplicate: the same object reaches us from every connected server
+        // that has seen it, and re-fetching it wastes the origin's bandwidth as
+        // much as ours.
         //
-        // Deletions are exempt. A delete for a URI we already indexed must be
-        // acted on, and it also clears the URI so the object can be re-indexed
-        // if it comes back.
+        // `update` and `delete` are exempt, because they exist precisely to
+        // report that a URI we already know about has changed. Deduplicating
+        // them would discard the only notification we get. `new`, `trending`
+        // and backfill fulfilment all describe objects in their current state,
+        // so those do dedupe.
         const isDelete = parsed.eventType === "delete";
-        const freshUris = isDelete ? parsed.objectUris : markSeen(parsed.objectUris);
-        const duplicateUris = isDelete
+        const bypassDedup = isDelete || parsed.eventType === "update";
+        const deduped = markSeen(parsed.objectUris);
+        const freshUris = bypassDedup ? parsed.objectUris : deduped;
+        const duplicateUris = bypassDedup
           ? []
-          : parsed.objectUris.filter((u) => !freshUris.includes(u));
+          : parsed.objectUris.filter((u) => !deduped.includes(u));
 
         const ctx: AnnouncementContext = { announcement: parsed, server, freshUris, duplicateUris };
 
@@ -364,9 +368,12 @@ export function dataSharingCapability(opts: DataSharingOptions): Capability {
             if (result.accepted) {
               await handlers.onAccepted?.(result, ctx);
             } else {
-              // A rejected object must not stay in the seen set, or a later
-              // announcement after the author opts in would be silently dropped.
-              forgetSeen(uri);
+              // A rejected URI stays in the seen set on purpose. Dropping it
+              // would mean re-fetching every private or deleted object each
+              // time any connected server mentions it again, which is the
+              // hammering dedup exists to prevent. Consent that changes later
+              // reaches us through an `update` event, which bypasses dedup, or
+              // through the periodic revalidation pass (plan task 3.5).
               console.log(`[data_sharing] rejected ${uri}: ${result.reason}`);
               await handlers.onRejected?.(result, ctx);
             }
