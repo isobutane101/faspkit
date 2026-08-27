@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { generateKeypair } from "./crypto.js";
+import { SecretBox, secretBoxFromEnv } from "./secretbox.js";
 
 export interface ServerRecord {
   serverId: string;        // ID we generated for the fediverse server
@@ -15,133 +16,252 @@ export interface ServerRecord {
   capabilities: string[];
   createdAt: string;
   status: "pending" | "active";
+
+  // Key rotation. The FASP spec defines no rotation handshake, so these are a
+  // local facility: they let a key change be absorbed without dropping requests
+  // that were already in flight, signed with the key being retired.
+  previousOurPublicKey?: string;
+  previousOurPrivateKey?: string;
+  previousTheirPublicKey?: string;
+  /** ISO timestamp after which the previous key stops being accepted. */
+  previousKeyExpiresAt?: string;
+  rotatedAt?: string;
 }
 
-// Resolved per call, not at import time, so tests and embedders can point
-// FASPKIT_DATA somewhere else after this module has been loaded.
-function dataDir(): string {
-  return process.env.FASPKIT_DATA ?? path.join(process.cwd(), "data");
-}
-
-function dbPath(): string {
-  return path.join(dataDir(), "servers.json");
-}
-
-function load(): Record<string, ServerRecord> {
-  try {
-    return JSON.parse(fs.readFileSync(dbPath(), "utf8"));
-  } catch {
-    return {};
+/** Their public keys we will currently accept: current, plus previous if unexpired. */
+export function acceptableTheirKeys(rec: ServerRecord, now = new Date()): string[] {
+  const keys: string[] = [];
+  if (rec.theirPublicKey) keys.push(rec.theirPublicKey);
+  if (
+    rec.previousTheirPublicKey &&
+    rec.previousKeyExpiresAt &&
+    new Date(rec.previousKeyExpiresAt) > now
+  ) {
+    keys.push(rec.previousTheirPublicKey);
   }
+  return keys;
 }
 
-function save(db: Record<string, ServerRecord>) {
-  fs.mkdirSync(dataDir(), { recursive: true });
-  fs.writeFileSync(dbPath(), JSON.stringify(db, null, 2));
+/**
+ * Persistence for server records, keys, and the dedup seen-set.
+ *
+ * Async throughout even though the bundled implementation is a synchronous JSON
+ * file, so that a database-backed adapter can be dropped in without changing a
+ * single call site.
+ */
+export interface FaspStore {
+  createServer(serverUrl: string, baseUrl: string): Promise<ServerRecord>;
+  getServer(serverId: string): Promise<ServerRecord | undefined>;
+  updateServer(serverId: string, patch: Partial<ServerRecord>): Promise<ServerRecord>;
+  allServers(): Promise<ServerRecord[]>;
+  serverByFaspId(faspId: string): Promise<ServerRecord | undefined>;
+
+  /** Record URIs, returning only those not seen before, order preserved. */
+  markSeen(uris: string[]): Promise<string[]>;
+  hasSeen(uri: string): Promise<boolean>;
+  forgetSeen(uri: string): Promise<void>;
+  seenCount(): Promise<number>;
 }
 
 export function newId(): string {
   return crypto.randomBytes(6).toString("hex");
 }
 
-export function createServer(serverUrl: string, baseUrl: string): ServerRecord {
-  const db = load();
-  const { publicKey, privateKey } = generateKeypair();
-  const rec: ServerRecord = {
-    serverId: newId(),
-    baseUrl: baseUrl.replace(/\/$/, ""),
-    serverUrl: serverUrl.replace(/\/$/, ""),
-    ourPublicKey: publicKey,
-    ourPrivateKey: privateKey,
-    capabilities: [],
-    createdAt: new Date().toISOString(),
-    status: "pending",
+// ---------------------------------------------------------------------------
+// JSON file adapter
+// ---------------------------------------------------------------------------
+
+const PRIVATE_FIELDS = ["ourPrivateKey", "previousOurPrivateKey"] as const;
+
+export interface JsonStoreOptions {
+  /** Defaults to FASPKIT_DATA, or ./data. */
+  dataDir?: string;
+  /** Defaults to one built from the environment. */
+  secretBox?: SecretBox;
+}
+
+export function createJsonStore(options: JsonStoreOptions = {}): FaspStore {
+  // Resolved per call, not captured at construction, so tests and embedders can
+  // point FASPKIT_DATA somewhere else after this module has been loaded.
+  const dataDir = () => options.dataDir ?? process.env.FASPKIT_DATA ?? path.join(process.cwd(), "data");
+  const serversPath = () => path.join(dataDir(), "servers.json");
+  const seenPath = () => path.join(dataDir(), "seen.json");
+
+  let box: SecretBox | undefined = options.secretBox;
+  const secretBox = () => (box ??= secretBoxFromEnv());
+
+  function readJson<T>(file: string, fallback: T): T {
+    try {
+      return JSON.parse(fs.readFileSync(file, "utf8")) as T;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function writeJson(file: string, value: unknown) {
+    fs.mkdirSync(dataDir(), { recursive: true });
+    // Write via a temp file so a crash mid-write cannot truncate the store.
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2));
+    fs.renameSync(tmp, file);
+  }
+
+  function decrypt(rec: ServerRecord): ServerRecord {
+    const out = { ...rec };
+    for (const field of PRIVATE_FIELDS) {
+      const value = out[field];
+      if (typeof value === "string") out[field] = secretBox().open(value);
+    }
+    return out;
+  }
+
+  function encrypt(rec: ServerRecord): ServerRecord {
+    const out = { ...rec };
+    for (const field of PRIVATE_FIELDS) {
+      const value = out[field];
+      if (typeof value === "string") out[field] = secretBox().seal(value);
+    }
+    return out;
+  }
+
+  function load(): Record<string, ServerRecord> {
+    const raw = readJson<Record<string, ServerRecord>>(serversPath(), {});
+    const out: Record<string, ServerRecord> = {};
+    for (const [id, rec] of Object.entries(raw)) out[id] = decrypt(rec);
+    return out;
+  }
+
+  function save(db: Record<string, ServerRecord>) {
+    const out: Record<string, ServerRecord> = {};
+    for (const [id, rec] of Object.entries(db)) out[id] = encrypt(rec);
+    writeJson(serversPath(), out);
+  }
+
+  const loadSeen = () => readJson<Record<string, string>>(seenPath(), {});
+
+  return {
+    async createServer(serverUrl, baseUrl) {
+      const db = load();
+      const { publicKey, privateKey } = generateKeypair();
+      const rec: ServerRecord = {
+        serverId: newId(),
+        baseUrl: baseUrl.replace(/\/$/, ""),
+        serverUrl: serverUrl.replace(/\/$/, ""),
+        ourPublicKey: publicKey,
+        ourPrivateKey: privateKey,
+        capabilities: [],
+        createdAt: new Date().toISOString(),
+        status: "pending",
+      };
+      db[rec.serverId] = rec;
+      save(db);
+      return rec;
+    },
+
+    async getServer(serverId) {
+      return load()[serverId];
+    },
+
+    async updateServer(serverId, patch) {
+      const db = load();
+      if (!db[serverId]) throw new Error(`unknown server ${serverId}`);
+      db[serverId] = { ...db[serverId], ...patch };
+      save(db);
+      return db[serverId];
+    },
+
+    async allServers() {
+      return Object.values(load());
+    },
+
+    async serverByFaspId(faspId) {
+      return Object.values(load()).find((s) => s.faspId === faspId);
+    },
+
+    async markSeen(uris) {
+      const seen = loadSeen();
+      const at = new Date().toISOString();
+      const fresh: string[] = [];
+      for (const uri of uris) {
+        if (uri in seen) continue;
+        seen[uri] = at;
+        fresh.push(uri);
+      }
+      if (fresh.length) writeJson(seenPath(), seen);
+      return fresh;
+    },
+
+    async hasSeen(uri) {
+      return uri in loadSeen();
+    },
+
+    async forgetSeen(uri) {
+      const seen = loadSeen();
+      if (!(uri in seen)) return;
+      delete seen[uri];
+      writeJson(seenPath(), seen);
+    },
+
+    async seenCount() {
+      return Object.keys(loadSeen()).length;
+    },
   };
-  db[rec.serverId] = rec;
-  save(db);
-  return rec;
 }
 
-export function getServer(serverId: string): ServerRecord | undefined {
-  return load()[serverId];
-}
-
-export function updateServer(serverId: string, patch: Partial<ServerRecord>) {
-  const db = load();
-  if (!db[serverId]) throw new Error(`unknown server ${serverId}`);
-  db[serverId] = { ...db[serverId], ...patch };
-  save(db);
-  return db[serverId];
-}
-
-export function allServers(): ServerRecord[] {
-  return Object.values(load());
-}
-
-/** Look up the public key a fediverse server signs with, by its faspId. */
-export function lookupKeyByFaspId(faspId: string): string | undefined {
-  return allServers().find((s) => s.faspId === faspId)?.theirPublicKey;
-}
-
-export function serverByFaspId(faspId: string): ServerRecord | undefined {
-  return allServers().find((s) => s.faspId === faspId);
-}
+/** The store used when none is injected. */
+export const defaultStore: FaspStore = createJsonStore();
 
 // ---------------------------------------------------------------------------
-// Deduplication
+// Key rotation
 // ---------------------------------------------------------------------------
+
+const DEFAULT_OVERLAP_SECONDS = 24 * 60 * 60;
 
 /**
- * Servers share remote content as well as local, so a FASP connected to many
- * instances will be told about the same object repeatedly. The spec requires
- * deduplicating it; this is the persistent record of what has already been seen.
+ * Accept a new public key from a fediverse server, keeping the old one valid
+ * for an overlap window.
  *
- * JSON-file backed like the rest of the store today. Phase 2 moves both behind
- * a storage interface.
+ * Without the overlap, every request already in flight and signed with the
+ * retired key fails verification at the moment of the swap.
  */
-function seenPath(): string {
-  return path.join(dataDir(), "seen.json");
+export async function rotateTheirKey(
+  store: FaspStore,
+  serverId: string,
+  newPublicKey: string,
+  overlapSeconds = DEFAULT_OVERLAP_SECONDS,
+): Promise<ServerRecord> {
+  const rec = await store.getServer(serverId);
+  if (!rec) throw new Error(`unknown server ${serverId}`);
+  return store.updateServer(serverId, {
+    previousTheirPublicKey: rec.theirPublicKey,
+    theirPublicKey: newPublicKey,
+    previousKeyExpiresAt: new Date(Date.now() + overlapSeconds * 1000).toISOString(),
+    rotatedAt: new Date().toISOString(),
+  });
 }
 
-function loadSeen(): Record<string, string> {
-  try {
-    return JSON.parse(fs.readFileSync(seenPath(), "utf8"));
-  } catch {
-    return {};
-  }
-}
-
-function saveSeen(seen: Record<string, string>) {
-  fs.mkdirSync(dataDir(), { recursive: true });
-  fs.writeFileSync(seenPath(), JSON.stringify(seen, null, 2));
-}
-
-export function hasSeen(uri: string): boolean {
-  return uri in loadSeen();
-}
-
-/** Record these URIs and return only the ones not seen before, order preserved. */
-export function markSeen(uris: string[]): string[] {
-  const seen = loadSeen();
-  const at = new Date().toISOString();
-  const fresh: string[] = [];
-  for (const uri of uris) {
-    if (uri in seen) continue;
-    seen[uri] = at;
-    fresh.push(uri);
-  }
-  if (fresh.length) saveSeen(seen);
-  return fresh;
-}
-
-/** Drop a URI from the seen set, so a deleted object can be re-indexed later. */
-export function forgetSeen(uri: string): void {
-  const seen = loadSeen();
-  if (!(uri in seen)) return;
-  delete seen[uri];
-  saveSeen(seen);
-}
-
-export function seenCount(): number {
-  return Object.keys(loadSeen()).length;
+/**
+ * Roll our own keypair for one server. We sign with the new key immediately and
+ * retain the old one for reference.
+ *
+ * Note the asymmetry, and the caveat: the spec defines no way to tell an
+ * instance that our key changed, so it will keep verifying against the public
+ * key it was given at registration and will reject everything we sign with the
+ * new one. Until an upstream rotation handshake exists, this is only safe
+ * alongside re-registration.
+ */
+export async function rotateOurKeypair(
+  store: FaspStore,
+  serverId: string,
+): Promise<ServerRecord> {
+  const rec = await store.getServer(serverId);
+  if (!rec) throw new Error(`unknown server ${serverId}`);
+  const { publicKey, privateKey } = generateKeypair();
+  return store.updateServer(serverId, {
+    previousOurPublicKey: rec.ourPublicKey,
+    previousOurPrivateKey: rec.ourPrivateKey,
+    ourPublicKey: publicKey,
+    ourPrivateKey: privateKey,
+    rotatedAt: new Date().toISOString(),
+  });
 }

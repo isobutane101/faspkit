@@ -284,6 +284,24 @@ function parseSignatures(header: string): Record<string, Buffer> {
   return out;
 }
 
+/**
+ * The keyids a `Signature-Input` header claims, without verifying anything.
+ *
+ * Verification needs the public key up front, but a store that reaches a
+ * database cannot be consulted from inside the synchronous verify path. So the
+ * caller extracts the claimed keyids, resolves them however it likes, and hands
+ * the result back as `lookupKey`. Nothing here is trusted: an attacker controls
+ * these strings, and a wrong or unknown one simply fails to verify.
+ */
+export function signatureKeyids(signatureInput: string | undefined): string[] {
+  if (!signatureInput) return [];
+  const seen = new Set<string>();
+  for (const cand of parseSignatureInput(signatureInput)) {
+    if (cand.params.keyid) seen.add(cand.params.keyid);
+  }
+  return [...seen];
+}
+
 /** RFC 8941 field-value canonicalization: trim OWS, join repeats with ", ". */
 function canonicalHeader(value: string | string[] | undefined): string | undefined {
   if (value === undefined) return undefined;
@@ -349,7 +367,12 @@ const MAX_SKEW_SECONDS = 300;
 interface VerifyCommon {
   headers: Record<string, string | string[] | undefined>;
   rawBody: string | Buffer;
-  lookupKey: (keyid: string) => string | undefined;
+  /**
+   * Resolve a keyid to the base64 public key(s) that may have produced it.
+   * Returning several accepts any of them, which is what lets a key rotation
+   * overlap: the previous key keeps verifying until it expires.
+   */
+  lookupKey: (keyid: string) => string | string[] | undefined;
   maxSkewSeconds?: number;
   replayGuard?: ReplayGuard;
 }
@@ -441,16 +464,19 @@ function verifyCandidate(
     values[c] = v;
   }
 
-  const publicKey = opts.lookupKey(keyid);
-  if (!publicKey) return fail("unknown keyid");
+  const resolved = opts.lookupKey(keyid);
+  const publicKeys = (Array.isArray(resolved) ? resolved : resolved === undefined ? [] : [resolved])
+    .filter((k) => typeof k === "string" && k.length > 0);
+  if (publicKeys.length === 0) return fail("unknown keyid");
 
   const base = signatureBase(values, cand.covered, cand.paramsRaw);
-  let ok: boolean;
-  try {
-    ok = crypto.verify(null, Buffer.from(base), importPublicKey(publicKey), sig);
-  } catch {
-    return fail("signature verification failed");
-  }
+  const ok = publicKeys.some((key) => {
+    try {
+      return crypto.verify(null, Buffer.from(base), importPublicKey(key), sig);
+    } catch {
+      return false;
+    }
+  });
   if (!ok) return fail("signature verification failed");
 
   // Only consume replay budget once the signature is known good, so garbage

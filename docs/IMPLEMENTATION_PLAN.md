@@ -91,27 +91,45 @@ clean. Two notes for whoever picks up Phase 2:
 
 ## Phase 2 — Storage and multi-tenancy
 
-- [ ] **2.1 Storage interface.** Extract a `FaspStore` interface
+- [x] **2.1 Storage interface.** Extract a `FaspStore` interface
       (`createServer`, `getServer`, `updateServer`, `allServers`, `lookupKeyByFaspId`).
       Make the JSON implementation one adapter behind it; inject into `createFasp`.
       *Accept:* `server.ts` imports the interface, not the JSON module.
 
-- [ ] **2.2 Postgres adapter.** Implement `PostgresStore` against the same
+- [ ] **2.2 Postgres adapter.** *(not started — needs the `pg` decision below)* Implement `PostgresStore` against the same
       interface using `pg`. Schema: `servers` table with the `ServerRecord` fields,
       unique index on `server_id` and `fasp_id`.
       *Ask before adding `pg` as a dependency.*
       *Accept:* the full e2e suite runs green against Postgres via an env switch.
 
-- [ ] **2.3 Private key encryption at rest.** Keys currently sit in plaintext JSON.
+- [x] **2.3 Private key encryption at rest.** Keys currently sit in plaintext JSON.
       Encrypt `ourPrivateKey` with AES-256-GCM using a key from `FASPKIT_SECRET`.
       Fail loudly at startup if the env var is missing in production mode.
       *Accept:* stored records contain no readable key material; round-trip test passes.
 
-- [ ] **2.4 Key rotation.** Support a second active keypair per server so keys can
+- [x] **2.4 Key rotation.** Support a second active keypair per server so keys can
       be rolled without breaking in-flight requests: verify against current and
       previous, sign with current.
       *Accept:* rotation test — requests signed with the old key still verify during
       the overlap window, then stop.
+
+---
+
+**2.1, 2.3 and 2.4 are done.** `FaspStore` is async throughout precisely so the
+Postgres adapter can drop in without touching a call site — which required
+resolving signature keys before verification rather than from inside it, hence
+`signatureKeyids()` in `crypto.ts` and `lookupKey` now accepting several keys.
+
+**2.2 still needs your call**, because `pg` would be the first runtime
+dependency beyond Express and changes what faspkit is positioned as. Everything
+else in this phase is dependency-free.
+
+One honest caveat on 2.4: the FASP spec defines no key-rotation handshake, so
+`rotateTheirKey` (accept a new key from an instance, keeping the old one for an
+overlap) is the useful half. `rotateOurKeypair` exists but cannot be used safely
+on its own — an instance keeps verifying against the public key it got at
+registration, so rolling our key breaks outbound requests until re-registration.
+That gap is worth raising upstream.
 
 ---
 

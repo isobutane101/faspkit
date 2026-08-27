@@ -1,5 +1,5 @@
 import { Capability, callServer, sendSigned, CallOptions } from "./server.js";
-import { ServerRecord, markSeen, forgetSeen } from "./store.js";
+import { ServerRecord, FaspStore, defaultStore } from "./store.js";
 import {
   evaluateContent,
   evaluateAccount,
@@ -286,6 +286,8 @@ function parseAnnouncement(body: unknown): Announcement | string {
 
 export interface DataSharingOptions extends Omit<RetrievalOptions, "actorCache"> {
   handlers?: DataSharingHandlers;
+  /** Persistence for the dedup seen-set. Defaults to the bundled JSON store. */
+  store?: FaspStore;
   /**
    * Retrieve announced objects and run the consent gate. Defaults to true.
    * Setting false gives you the raw announcement and leaves retrieval to you —
@@ -306,6 +308,7 @@ export function dataSharingCapability(opts: DataSharingOptions): Capability {
   const handlers = opts.handlers ?? {};
   const styleCache = opts.styleCache ?? createStyleCache();
   const shouldRetrieve = opts.retrieve !== false;
+  const store = opts.store ?? defaultStore;
 
   return {
     id: "data_sharing",
@@ -330,7 +333,7 @@ export function dataSharingCapability(opts: DataSharingOptions): Capability {
         // so those do dedupe.
         const isDelete = parsed.eventType === "delete";
         const bypassDedup = isDelete || parsed.eventType === "update";
-        const deduped = markSeen(parsed.objectUris);
+        const deduped = await store.markSeen(parsed.objectUris);
         const freshUris = bypassDedup ? parsed.objectUris : deduped;
         const duplicateUris = bypassDedup
           ? []
@@ -346,7 +349,7 @@ export function dataSharingCapability(opts: DataSharingOptions): Capability {
 
           if (isDelete) {
             for (const uri of parsed.objectUris) {
-              forgetSeen(uri);
+              await store.forgetSeen(uri);
               await handlers.onDelete?.(uri, ctx);
             }
             return;

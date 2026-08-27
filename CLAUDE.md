@@ -33,7 +33,8 @@ rather than inventing endpoint shapes.
 ```
 src/crypto.ts       RFC 9421 signatures (Ed25519) + RFC 9530 content-digest. Pure, no I/O.
 src/consent.ts      FEP-5feb / public-scope consent rules. Pure, no I/O.
-src/store.ts        Server records, keys, and the dedup seen-set. JSON today.
+src/secretbox.ts    AES-256-GCM encryption at rest for private keys.
+src/store.ts        FaspStore interface + JSON adapter. Records, keys, seen-set.
 src/activitypub.ts  Server actor, WebFinger, signed object fetching, double-knocking.
 src/server.ts       createFasp(), registration handshake, signature middleware, debug capability.
 src/datasharing.ts  data_sharing capability: announcements, subscriptions, backfill.
@@ -41,6 +42,7 @@ src/index.ts        Public exports + linkPreviewCapability sketch + optional run
 
 scripts/crypto.test.ts       Known-answer unit tests for the signature layer.
 scripts/consent.test.ts      Consent fixtures: public vs unlisted vs opted-out.
+scripts/store.test.ts        Storage interface, encryption at rest, key rotation.
 scripts/e2e.ts               Mock fediverse server + full handshake test.
 scripts/datasharing.test.ts  Announcements, consent gate, dedup, double-knocking.
 ```
@@ -101,11 +103,14 @@ real Mastodon. They are the reason this library exists.
   This has already bitten once.
 - No new runtime dependencies without asking. Current runtime deps: `express`
   only. Node built-in `crypto` and global `fetch` cover everything else.
+- **Storage goes through `FaspStore`**, which is async so a database adapter can
+  replace the JSON one without touching a call site. Do not import store
+  internals directly; take a `FaspStore` and default it to `defaultStore`.
 - License AGPL-3.0, matching fediverse tooling norms.
 
 ## Testing
 
-`npm test` runs four suites, 210 assertions in total, all passing:
+`npm test` runs five suites, 267 assertions in total, all passing:
 
 - `scripts/crypto.test.ts` (63) — unit tests for the signature layer. A fixed
   keypair and a fixed `created` produce one exact signature base and one exact
@@ -118,7 +123,10 @@ real Mastodon. They are the reason this library exists.
   public, unlisted, followers-only, opted-out, and mismatched-author documents.
   These are the assertions with real consequences for real people; every
   plausible way a document could sneak past is asserted to fail closed.
-- `scripts/e2e.ts` (39) — spins up a mock fediverse server and a FASP mounted
+- `scripts/store.test.ts` (51) — the storage interface, AES-256-GCM encryption
+  at rest, and key rotation. Includes an assertion that reads the file back off
+  disk and confirms the private key is not in it.
+- `scripts/e2e.ts` (45) — spins up a mock fediverse server and a FASP mounted
   under a base URL *with* path segments (`/fasp/v1`), then runs the handshake,
   a signed round-trip, a signed `GET` with a query string, replay rejection,
   outbound `429`/timeout handling, and the negative cases.
@@ -127,8 +135,8 @@ real Mastodon. They are the reason this library exists.
   announcement endpoint, the consent gate end to end, deduplication,
   double-knocking, deletes, and backfill continuation.
 
-Run `npm run test:crypto`, `test:consent`, `test:e2e` or `test:datasharing` to
-run one of them.
+Run `npm run test:crypto`, `test:consent`, `test:store`, `test:e2e` or
+`test:datasharing` to run one of them.
 
 **Every new capability must add both positive and negative assertions to the e2e
 script.** A capability with only happy-path tests is not done.

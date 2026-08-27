@@ -28,13 +28,12 @@ import {
   createFasp,
   debugCapability,
   registerWithServer,
-  getServer,
   callServer,
   sendSigned,
   splitBaseUrl,
   Capability,
 } from "../src/server.js";
-import { newId } from "../src/store.js";
+import { newId, defaultStore, rotateTheirKey, acceptableTheirKeys } from "../src/store.js";
 
 const FEDI_PORT = 4001;
 const FASP_PORT = 4002;
@@ -201,7 +200,7 @@ async function main() {
   check("fingerprint is base64 sha-256", reg.fingerprint === keyFingerprint(reg.record.ourPublicKey));
   console.log(`     fingerprint: ${reg.fingerprint}`);
 
-  const rec = getServer(reg.record.serverId)!;
+  const rec = (await defaultStore.getServer(reg.record.serverId))!;
   const faspId = rec.faspId!;
   const logsUrl = `${FASP_BASE}/debug/v0/callback/logs`;
 
@@ -326,6 +325,49 @@ async function main() {
     const wrongKeyid = instanceSigns("POST", logsUrl, payload, rec.serverId);
     const wrongRes = await fetch(logsUrl, { method: "POST", headers: wrongKeyid, body: payload });
     check("signing with our serverId instead of the faspId is rejected", wrongRes.status === 401, `got ${wrongRes.status}`);
+  }
+
+  console.log("\n10. key rotation over the wire");
+  {
+    // An instance rolls the key it signs with. Requests already in flight were
+    // signed with the retired key, so both must verify during the overlap.
+    const rolled = generateKeypair();
+    await rotateTheirKey(defaultStore, rec.serverId, rolled.publicKey, 3600);
+
+    const withNew = signRequest({
+      method: "POST", targetUri: logsUrl, body: payload,
+      keyid: faspId, privateKey: rolled.privateKey, nonce: newId(),
+    });
+    const newRes = await fetch(logsUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-digest": withNew["content-digest"],
+        "signature-input": withNew["signature-input"],
+        signature: withNew.signature,
+      },
+      body: payload,
+    });
+    check("a request signed with the rotated-in key is accepted", newRes.status === 201, `got ${newRes.status}`);
+
+    const withOld = instanceSigns("POST", logsUrl, payload, faspId, undefined, newId());
+    const oldRes = await fetch(logsUrl, { method: "POST", headers: withOld, body: payload });
+    check("a request signed with the retired key still works during the overlap",
+      oldRes.status === 201, `got ${oldRes.status}`);
+
+    // Once the overlap lapses, the retired key must stop working.
+    await defaultStore.updateServer(rec.serverId, {
+      previousKeyExpiresAt: new Date(Date.now() - 1000).toISOString(),
+    });
+    const expiredRec = (await defaultStore.getServer(rec.serverId))!;
+    check("only the current key remains acceptable", acceptableTheirKeys(expiredRec).length === 1);
+
+    const afterExpiry = await fetch(logsUrl, {
+      method: "POST",
+      headers: instanceSigns("POST", logsUrl, payload, faspId, undefined, newId()),
+      body: payload,
+    });
+    check("the retired key is rejected once the overlap expires", afterExpiry.status === 401, `got ${afterExpiry.status}`);
   }
 
   console.log(`\n${pass} passed, ${fail} failed\n`);

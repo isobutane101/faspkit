@@ -21,8 +21,8 @@ const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "faspkit-ds-"));
 process.env.FASPKIT_DATA = DATA_DIR;
 
 import { signRequest, generateKeypair } from "../src/crypto.js";
-import { createFasp, registerWithServer, getServer } from "../src/server.js";
-import { newId, seenCount, hasSeen } from "../src/store.js";
+import { createFasp, registerWithServer } from "../src/server.js";
+import { newId, defaultStore } from "../src/store.js";
 import {
   dataSharingCapability,
   subscribe,
@@ -226,7 +226,7 @@ async function main() {
   await new Promise((r) => setTimeout(r, 300));
 
   const reg = await registerWithServer(faspOptions, FEDI_URL);
-  const rec = getServer(reg.record.serverId)!;
+  const rec = (await defaultStore.getServer(reg.record.serverId))!;
   const faspId = rec.faspId!;
 
   console.log("\n1. actor and webfinger (required to fetch objects at all)");
@@ -334,7 +334,7 @@ async function main() {
 
     // A rejected URI stays recorded, so the origin is not re-fetched every
     // time another connected server mentions the same object.
-    check("rejected URIs stay in the seen set", hasSeen(`${ORIGIN_URL}/statuses/unlisted`));
+    check("rejected URIs stay in the seen set", await defaultStore.hasSeen(`${ORIGIN_URL}/statuses/unlisted`));
   }
 
   console.log("\n6. accepted content");
@@ -410,14 +410,14 @@ async function main() {
   console.log("\n9. deletes and backfill continuation");
   {
     deletes.length = 0;
-    const before = seenCount();
+    const before = await defaultStore.seenCount();
     await announce({
       source: { subscription: { id: "3446" } }, category: "content", eventType: "delete",
       objectUris: [`${ORIGIN_URL}/statuses/public`],
     }, faspId);
     check("delete event dispatched to onDelete", await waitFor(() => deletes.length === 1));
     check("deleted URI is forgotten so it can be re-indexed later",
-      !hasSeen(`${ORIGIN_URL}/statuses/public`) && seenCount() < before);
+      !(await defaultStore.hasSeen(`${ORIGIN_URL}/statuses/public`)) && (await defaultStore.seenCount()) < before);
 
     moreAvailable.length = 0;
     await announce({

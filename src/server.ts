@@ -5,15 +5,13 @@ import {
   verifyRequest,
   keyFingerprint,
   createReplayGuard,
+  signatureKeyids,
   ReplayGuard,
 } from "./crypto.js";
 import {
-  createServer,
-  updateServer,
-  getServer,
-  allServers,
-  lookupKeyByFaspId,
-  serverByFaspId,
+  FaspStore,
+  defaultStore,
+  acceptableTheirKeys,
   ServerRecord,
 } from "./store.js";
 
@@ -40,6 +38,8 @@ export interface FaspOptions {
   maxSkewSeconds?: number;
   /** Shared across middleware instances so replays are caught process-wide. */
   replayGuard?: ReplayGuard;
+  /** Persistence. Defaults to the bundled JSON store. */
+  store?: FaspStore;
 }
 
 declare global {
@@ -202,8 +202,9 @@ export async function registerWithServer(
   opts: FaspOptions,
   serverUrl: string,
 ): Promise<{ record: ServerRecord; fingerprint: string; completionUri: string }> {
+  const store = opts.store ?? defaultStore;
   const baseUrl = await discoverFaspBaseUrl(serverUrl);
-  const rec = createServer(serverUrl, baseUrl);
+  const rec = await store.createServer(serverUrl, baseUrl);
 
   const res = await callServer(rec, "POST", "/registration", {
     name: opts.name,
@@ -221,9 +222,10 @@ export async function registerWithServer(
     registrationCompletionUri: string;
   };
 
-  const updated = updateServer(rec.serverId, {
+  const updated = await store.updateServer(rec.serverId, {
     faspId: data.faspId,
     theirPublicKey: data.publicKey,
+    status: "active",
   });
 
   return {
@@ -248,22 +250,40 @@ export async function registerWithServer(
 export function requireSignature(opts: FaspOptions) {
   const { origin } = splitBaseUrl(opts.baseUrl);
   const replayGuard = opts.replayGuard ?? createReplayGuard(opts.maxSkewSeconds ?? 300);
+  const store = opts.store ?? defaultStore;
 
-  return (req: Request, res: ExpressResponse, next: NextFunction) => {
+  return async (req: Request, res: ExpressResponse, next: NextFunction) => {
     const raw = (req as Request & { rawBody?: string }).rawBody ?? "";
+    const header = req.headers["signature-input"];
+
+    // The store may be remote, so resolve the claimed keyids up front rather
+    // than from inside the synchronous verify path. These strings are attacker
+    // controlled and are trusted for nothing: an unknown one simply resolves to
+    // no key and fails to verify.
+    const records = new Map<string, ServerRecord>();
+    for (const keyid of signatureKeyids(Array.isArray(header) ? header[0] : header)) {
+      const rec = await store.serverByFaspId(keyid);
+      if (rec) records.set(keyid, rec);
+    }
+
     const result = verifyRequest({
       method: req.method,
       targetUri: `${origin}${req.originalUrl}`,
       rawBody: raw,
       headers: req.headers as Record<string, string | string[] | undefined>,
-      lookupKey: lookupKeyByFaspId,
+      // Both the current and an unexpired previous key are accepted, so a
+      // rotation does not reject requests that were already in flight.
+      lookupKey: (keyid) => {
+        const rec = records.get(keyid);
+        return rec ? acceptableTheirKeys(rec) : undefined;
+      },
       maxSkewSeconds: opts.maxSkewSeconds,
       replayGuard,
     });
     if (!result.ok) {
       return res.status(401).json({ error: "unauthorized", reason: result.reason });
     }
-    const rec = serverByFaspId(result.keyid!);
+    const rec = records.get(result.keyid!);
     if (!rec) {
       return res.status(401).json({ error: "unauthorized", reason: "unknown server" });
     }
@@ -382,7 +402,10 @@ export function createFasp(opts: FaspOptions) {
   for (const cap of opts.capabilities) cap.register?.(guarded);
   routes.use(guarded);
 
-  routes.get("/health", (_req, res) => res.json({ ok: true, servers: allServers().length }));
+  routes.get("/health", async (_req, res) => {
+    const servers = await (opts.store ?? defaultStore).allServers();
+    res.json({ ok: true, servers: servers.length });
+  });
 
   app.use(basePath === "" ? "/" : basePath, routes);
   return app;
@@ -423,4 +446,4 @@ export function debugCapability(): Capability {
   };
 }
 
-export { getServer, allServers };
+export { defaultStore };
